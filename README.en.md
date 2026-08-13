@@ -19,6 +19,33 @@ is also supported.
 - **Status & stop**: `deepseek --status` shows the run state; `deepseek --stop` stops the service and reminds you how to restart it
 - **Works on both Windows 10 and Windows 11**
 
+## Installation
+
+### Option 1: One-line install via PowerShell (recommended)
+
+```powershell
+irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
+```
+
+Downloads the latest Release, extracts it to `%USERPROFILE%\dsh-launcher`, and registers the `deepseek` command automatically.
+
+### Option 2: Manual install
+
+1. Download `dsh-launcher.zip` from [Releases](https://github.com/RYun601/dsh-launcher/releases) and extract it
+2. Run `install-command.cmd` (registers the `deepseek` command)
+3. Open a new terminal and type `deepseek`
+
+### Option 3: Run from source
+
+```sh
+git clone https://github.com/RYun601/dsh-launcher.git
+cd dsh-launcher
+```
+
+> Prerequisite: install [Node.js](https://nodejs.org) LTS. DeepSeek Harness itself needs no separate
+> installation — it is downloaded automatically via `npx @deepseek-ai/dsh web` on first run
+> (same usage as the [official DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)).
+
 ## Quick Start
 
 1. Install [Node.js](https://nodejs.org) LTS (prerequisite for DeepSeek Harness)

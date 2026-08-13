@@ -18,6 +18,32 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 - **状态查询与停止**：`deepseek --status` 查看运行状态，`deepseek --stop` 一键停止并提示重启命令
 - **跨系统通用**：Win10 / Win11 均可使用
 
+## 安装
+
+### 方式一：PowerShell 一行命令（推荐）
+
+```powershell
+irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
+```
+
+自动完成：下载最新 Release → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
+
+### 方式二：手动安装
+
+1. 从 [Releases](https://github.com/RYun601/dsh-launcher/releases) 下载 `dsh-launcher.zip` 并解压
+2. 双击运行 `install-command.cmd`（注册 `deepseek` 命令）
+3. 新开终端，输入 `deepseek`
+
+### 方式三：从源码运行
+
+```sh
+git clone https://github.com/RYun601/dsh-launcher.git
+cd dsh-launcher
+```
+
+> 前置条件：安装 [Node.js](https://nodejs.org) LTS。DSH 本体无需单独安装——首次启动时自动通过
+> `npx @deepseek-ai/dsh web` 下载（与 [DeepSeek Harness 官方](https://github.com/deepseek-ai/deepseek-harness) 的用法一致）。
+
 ## 快速开始
 
 1. 安装 [Node.js](https://nodejs.org) LTS（运行 DeepSeek Harness 的前置条件）
