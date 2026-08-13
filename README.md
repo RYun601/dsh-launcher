@@ -60,14 +60,12 @@ npx @deepseek-ai/dsh web
 
 ## 快速开始
 
-1. 安装 [Node.js](https://nodejs.org) LTS（运行 DeepSeek Harness 的前置条件）
-2. 运行 `install-command.cmd`，把脚本目录加入 PATH，注册 `deepseek` 命令
-3. **新开**一个终端窗口（已打开的窗口不会加载新 PATH）
-4. 输入 `deepseek -b` 后台启动（或输入 `deepseek` 前台启动）
-5. 首次运行会自动通过 `npx` 下载 DeepSeek Harness（需联网，约 1-2 分钟）
-6. 服务就绪后浏览器自动打开 http://127.0.0.1:3080
+完成上方「安装」（任选一种方式）并**新开**一个终端窗口（使新 PATH 生效）后：
 
-> 注意：首次使用需要在 DeepSeek Harness 界面登录 / 填入 API Key。
+1. 输入 `deepseek -b` 后台启动（或输入 `deepseek` 前台启动）
+2. 首次运行会自动通过 `npx` 下载 DeepSeek Harness（需联网，约 1-2 分钟）
+3. 服务就绪后浏览器自动打开 http://127.0.0.1:3080
+4. 首次使用需要在 DeepSeek Harness 界面登录 / 填入 API Key
 
 ## 命令行用法
 

@@ -61,14 +61,13 @@ npx @deepseek-ai/dsh web
 
 ## Quick Start
 
-1. Install [Node.js](https://nodejs.org) LTS (prerequisite for DeepSeek Harness)
-2. Run `install-command.cmd` to add this folder to the user PATH and register the `deepseek` command
-3. Open a **new** terminal window (already-open windows won't pick up the new PATH)
-4. Type `deepseek -b` for background mode (or `deepseek` for foreground mode)
-5. On first run, DeepSeek Harness is downloaded automatically via `npx` (needs internet, ~1-2 minutes)
-6. The browser opens http://127.0.0.1:3080 automatically when the service is ready
+After completing the installation above (any option) and opening a **new** terminal window
+(so the new PATH takes effect):
 
-> Note: on first use, sign in / enter an API Key in the DeepSeek Harness UI.
+1. Type `deepseek -b` for background mode (or `deepseek` for foreground mode)
+2. On first run, DeepSeek Harness is downloaded automatically via `npx` (needs internet, ~1-2 minutes)
+3. The browser opens http://127.0.0.1:3080 automatically when the service is ready
+4. On first use, sign in / enter an API Key in the DeepSeek Harness UI
 
 ## CLI Usage
 
