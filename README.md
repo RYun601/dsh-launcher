@@ -41,8 +41,22 @@ git clone https://github.com/RYun601/dsh-launcher.git
 cd dsh-launcher
 ```
 
-> 前置条件：安装 [Node.js](https://nodejs.org) LTS。DSH 本体无需单独安装——首次启动时自动通过
-> `npx @deepseek-ai/dsh web` 下载（与 [DeepSeek Harness 官方](https://github.com/deepseek-ai/deepseek-harness) 的用法一致）。
+### 前置条件：安装 DeepSeek Harness
+
+dsh-launcher 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的启动器，
+需先安装 DSH 本体（安装命令参考官方仓库）：
+
+1. 安装 [Node.js](https://nodejs.org) LTS
+2. 运行：
+
+```sh
+npx @deepseek-ai/dsh web
+```
+
+3. 浏览器打开 http://127.0.0.1:3080 看到界面即安装成功（Ctrl+C 退出）
+
+> 说明：dsh-launcher 每次启动也会通过 `npx --yes @deepseek-ai/dsh web` 自动下载 / 复用 DSH；
+> 提前执行上面的命令可以验证环境并预先缓存组件。
 
 ## 快速开始
 

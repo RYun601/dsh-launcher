@@ -42,9 +42,22 @@ git clone https://github.com/RYun601/dsh-launcher.git
 cd dsh-launcher
 ```
 
-> Prerequisite: install [Node.js](https://nodejs.org) LTS. DeepSeek Harness itself needs no separate
-> installation — it is downloaded automatically via `npx @deepseek-ai/dsh web` on first run
-> (same usage as the [official DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)).
+### Prerequisite: Install DeepSeek Harness
+
+dsh-launcher is a launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness);
+DeepSeek Harness itself must be installed first (install commands from the official repo):
+
+1. Install [Node.js](https://nodejs.org) LTS
+2. Run:
+
+```sh
+npx @deepseek-ai/dsh web
+```
+
+3. The UI at http://127.0.0.1:3080 means the installation succeeded (press Ctrl+C to exit)
+
+> Note: dsh-launcher also downloads/reuses DeepSeek Harness via `npx --yes @deepseek-ai/dsh web`
+> on every start; running the command above beforehand verifies the environment and warms the cache.
 
 ## Quick Start
 
