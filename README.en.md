@@ -1,5 +1,11 @@
 # dsh-launcher
 
+[中文](README.md) | [English](README.en.md)
+
+![License](https://img.shields.io/github/license/RYun601/dsh-launcher)
+![Release](https://img.shields.io/github/v/release/RYun601/dsh-launcher)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
+
 A launch & management tool for [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web on Windows:
 type `deepseek` in cmd / PowerShell to start it (foreground / background modes), auto-open the
 browser, check status, and stop the service. One-click registration of the `deepseek` command
@@ -32,6 +38,8 @@ is also supported.
 | `deepseek -b` / `--background` / `--bg` | Background mode: keeps running without a window; browser opens automatically when ready |
 | `deepseek --status` | Show service state (`RUNNING - PID xxxx` / `NOT RUNNING`) |
 | `deepseek --stop` | Stop the service (finds the process by port 3080) and reminds you how to restart |
+| `deepseek --update` | Compare the local version with the latest on npm and show how to update |
+| `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
 | `deepseek --check` | Environment self-check (script path / npx / port) |
 | `deepseek --help` | Show help |
 
@@ -48,6 +56,9 @@ is also supported.
 | `start-background.cmd` / `.ps1` | Background launch: runs without a window; logs go to `%USERPROFILE%\dsh-launch\dsh-background.log` |
 | `stop-dsh.cmd` / `.ps1` | Stop the service (finds the process by port 3080) |
 | `open-when-ready.ps1` | Polls the port and opens the browser when the service is ready (900-second timeout) |
+| `background-run.cmd` | Actual executor for background mode: merges output into the log with a timestamp header |
+| `update-check.ps1` | Version comparison: local npx cache vs latest on npm |
+| `uninstall.ps1` | Removes this folder from the user PATH |
 | `install-command.cmd` | Adds this folder to the user PATH and registers the `deepseek` command |
 | `deepseek.ico` | Official DeepSeek whale icon (16-256px, multiple sizes) |
 

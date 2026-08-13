@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare package
+        run: |
+          mkdir -p dist/dsh-launcher
+          cp deepseek.cmd install-command.cmd start-deepseek-harness.bat \
+             start-background.cmd start-background.ps1 stop-dsh.cmd stop-dsh.ps1 \
+             open-when-ready.ps1 background-run.cmd update-check.ps1 uninstall.ps1 \
+             deepseek.ico README.md README.en.md dist/dsh-launcher/
+          # Windows 批处理文件必须使用 CRLF 行尾
+          sed -i 's/$/\r/' dist/dsh-launcher/*.cmd dist/dsh-launcher/*.bat
+          cd dist && zip -r dsh-launcher.zip dsh-launcher
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/dsh-launcher.zip
+          generate_release_notes: true

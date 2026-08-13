@@ -2,6 +2,10 @@
 
 [中文](README.md) | [English](README.en.md)
 
+![License](https://img.shields.io/github/license/RYun601/dsh-launcher)
+![Release](https://img.shields.io/github/v/release/RYun601/dsh-launcher)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
+
 Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动与管理工具：
 在 cmd / PowerShell 中输入 `deepseek` 即可一键启动（前台 / 后台双模式）、自动打开浏览器、
 查询状态、停止服务，支持一键注册 `deepseek` 命令。
@@ -33,6 +37,8 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 | `deepseek -b` / `--background` / `--bg` | 后台启动：无窗口持续运行，服务就绪后浏览器自动打开 |
 | `deepseek --status` | 查看服务状态（`RUNNING - PID xxxx` / `NOT RUNNING`） |
 | `deepseek --stop` | 停止服务（按端口 3080 定位进程），并提示重新启动命令 |
+| `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
+| `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
 | `deepseek --check` | 环境自检（脚本路径 / npx / 端口） |
 | `deepseek --help` | 查看帮助 |
 
@@ -49,6 +55,9 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 | `start-background.cmd` / `.ps1` | 后台启动：无窗口运行，日志写入 `%USERPROFILE%\dsh-launch\dsh-background.log` |
 | `stop-dsh.cmd` / `.ps1` | 停止服务（按端口 3080 定位进程） |
 | `open-when-ready.ps1` | 轮询探测端口，服务就绪后自动打开浏览器（900 秒超时保护） |
+| `background-run.cmd` | 后台模式的实际执行体：日志合并写入并带时间戳头 |
+| `update-check.ps1` | 版本对比：本地 npx 缓存 vs npm 最新版 |
+| `uninstall.ps1` | 从用户 PATH 移除本目录 |
 | `install-command.cmd` | 把脚本目录加入用户 PATH，注册 `deepseek` 命令 |
 | `deepseek.ico` | DeepSeek 官方鲸鱼图标（16~256px 多尺寸） |
 
