@@ -1,31 +1,30 @@
-ï»¿@echo off
-chcp 65001 >nul
-title DeepSeek Harness å¿«æ·æ–¹å¼å®‰è£…
+@echo off
+title DeepSeek Harness ¿ì½İ·½Ê½°²×°
 echo ============================================
-echo   DeepSeek Harness å¿«æ·æ–¹å¼å®‰è£…è„šæœ¬
+echo   DeepSeek Harness ¿ì½İ·½Ê½°²×°½Å±¾
 echo ============================================
 echo.
 
-rem æ£€æŸ¥ Node.js
+rem ¼ì²é Node.js
 node --version >nul 2>&1
 if errorlevel 1 (
-    echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Node.jsã€‚
-    echo è¯·å…ˆåˆ° https://nodejs.org ä¸‹è½½å®‰è£… LTS ç‰ˆæœ¬ï¼Œç„¶åé‡æ–°è¿è¡Œæœ¬è„šæœ¬ã€‚
+    echo [´íÎó] Î´¼ì²âµ½ Node.js¡£
+    echo ÇëÏÈµ½ https://nodejs.org ÏÂÔØ°²×° LTS °æ±¾£¬È»ºóÖØĞÂÔËĞĞ±¾½Å±¾¡£
     start https://nodejs.org
     pause
     exit /b 1
 )
-echo [OK] å·²æ£€æµ‹åˆ° Node.jsï¼š
+echo [OK] ÒÑ¼ì²âµ½ Node.js£º
 node --version
 echo.
 
-echo æ­£åœ¨åˆ›å»ºæ¡Œé¢å¿«æ·æ–¹å¼...
+echo ÕıÔÚ´´½¨×ÀÃæ¿ì½İ·½Ê½...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=[Environment]::GetFolderPath('Desktop'); $s=(New-Object -ComObject WScript.Shell).CreateShortcut($d+'\DeepSeek Harness.lnk'); $s.TargetPath='%~dp0start-deepseek-harness.bat'; $s.WorkingDirectory='%~dp0'; $s.IconLocation='%~dp0deepseek.ico,0'; $s.Save()"
 if errorlevel 1 (
-    echo [é”™è¯¯] å¿«æ·æ–¹å¼åˆ›å»ºå¤±è´¥ï¼Œè¯·æ£€æŸ¥æƒé™åé‡è¯•ã€‚
+    echo [´íÎó] ¿ì½İ·½Ê½´´½¨Ê§°Ü£¬Çë¼ì²éÈ¨ÏŞºóÖØÊÔ¡£
 ) else (
-    echo [OK] æ¡Œé¢å¿«æ·æ–¹å¼åˆ›å»ºæˆåŠŸï¼
-    echo ç°åœ¨åŒå‡»æ¡Œé¢çš„ã€ŒDeepSeek Harnessã€å³å¯å¯åŠ¨ï¼Œæµè§ˆå™¨æ‰“å¼€ http://127.0.0.1:3080
+    echo [OK] ×ÀÃæ¿ì½İ·½Ê½´´½¨³É¹¦£¡
+    echo ÏÖÔÚË«»÷×ÀÃæµÄ¡¸DeepSeek Harness¡¹¼´¿ÉÆô¶¯£¬ä¯ÀÀÆ÷´ò¿ª http://127.0.0.1:3080
 )
 echo.
 pause
