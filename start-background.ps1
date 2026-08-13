@@ -12,4 +12,4 @@ if ($proc.HasExited) {
 }
 Write-Host "DeepSeek Harness 已在后台启动（PID $($proc.Id)）"
 Write-Host "服务就绪后浏览器将自动打开 http://127.0.0.1:3080"
-Write-Host "停止服务：双击 stop-dsh.cmd"
+Write-Host "停止服务：deepseek --stop"
