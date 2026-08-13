@@ -1,5 +1,7 @@
 # dsh-launcher
 
+[中文](README.md) | [English](README.en.md)
+
 Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动与管理工具：
 在 cmd / PowerShell 中输入 `deepseek` 即可一键启动（前台 / 后台双模式）、自动打开浏览器、
 查询状态、停止服务，支持一键注册 `deepseek` 命令。
