@@ -6,11 +6,10 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 
 ## 功能特性
 
-- **命令行启动**：`deepseek` 一条命令启动，无需找图标、记路径
+- **命令行启动**：在 cmd / PowerShell 中输入 `deepseek` 即可启动
 - **前台 / 后台双模式**：前台显示运行日志（关窗即停）；后台无窗口持续运行（关任何窗口都不影响）
 - **自动打开浏览器**：服务就绪后自动打开 http://127.0.0.1:3080，无需手动输入地址
 - **状态查询与停止**：`deepseek --status` 查看运行状态，`deepseek --stop` 一键停止并提示重启命令
-- **一键安装**：`安装命令.cmd` 注册 `deepseek` 命令；`安装快捷方式.cmd` 生成前台 + 后台两个桌面快捷方式
 - **跨系统通用**：Win10 / Win11 均可使用
 
 ## 快速开始
