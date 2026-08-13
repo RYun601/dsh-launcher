@@ -30,6 +30,8 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的一键
 | `stop-dsh.cmd` / `.ps1` | 停止服务（按端口 3080 定位进程） |
 | `安装快捷方式.cmd` | 一键安装桌面快捷方式（带图标） |
 | `deepseek.ico` | DeepSeek 官方鲸鱼图标（16~256px 多尺寸） |
+| deepseek.cmd | 命令行入口：deepseek 前台 / deepseek --background 后台 |
+| 安装命令.cmd | 把脚本目录加入用户 PATH，注册 deepseek 命令 |
 
 ## 常见问题
 
