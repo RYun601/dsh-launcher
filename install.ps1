@@ -1,4 +1,4 @@
-﻿# dsh-launcher 一键安装脚本
+# dsh-launcher 一键安装脚本
 # 用法（PowerShell）：
 #   irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
 # 可选参数（先下载到本地再运行）：
