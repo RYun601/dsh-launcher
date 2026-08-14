@@ -1,15 +1,12 @@
-name: Release
+name: Check
 
 on:
   push:
-    tags:
-      - 'v*'
-
-permissions:
-  contents: write
+    branches: [ main ]
+  pull_request:
 
 jobs:
-  package:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -35,10 +32,10 @@ jobs:
         run: |
           BOM=$(head -c 3 install.ps1 | xxd -p)
           if [ "$BOM" = "efbbbf" ]; then
-            echo "::error::install.ps1 starts with UTF-8 BOM - breaks irm|iex, aborting release"
+            echo "::error::install.ps1 starts with UTF-8 BOM - it breaks param() under irm|iex in PS 5.1, remove it"
             exit 1
           fi
-          echo "install.ps1 has no BOM, OK"
+          echo "install.ps1 has no BOM, OK (first bytes: $BOM)"
 
       - name: Validate cmd flags and log dir logic
         shell: bash
@@ -47,20 +44,3 @@ jobs:
           grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
           grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
           echo "cmd files OK"
-
-      - name: Prepare package
-        run: |
-          mkdir -p dist/dsh-launcher
-          cp deepseek.cmd install-command.cmd start-deepseek-harness.bat \
-             start-background.cmd start-background.ps1 stop-dsh.cmd stop-dsh.ps1 \
-             open-when-ready.ps1 background-run.cmd install.ps1 update-check.ps1 uninstall.ps1 \
-             deepseek.ico README.md README.en.md dist/dsh-launcher/
-          # Windows 批处理文件必须使用 CRLF 行尾
-          sed -i 's/$/\r/' dist/dsh-launcher/*.cmd dist/dsh-launcher/*.bat
-          cd dist && zip -r dsh-launcher.zip dsh-launcher
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/dsh-launcher.zip
-          generate_release_notes: true
