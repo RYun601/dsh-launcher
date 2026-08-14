@@ -7,6 +7,13 @@ param(
     [string]$InstallDir = (Join-Path $env:USERPROFILE 'dsh-launcher'),
     [switch]$SkipPath
 )
+# —— iex 管道防御 ——
+# 通过 `irm | iex` 执行时，若脚本文本以 BOM 字符(U+FEFF)开头，Windows PowerShell 5.1 会忽略 param() 块，
+# 导致 $InstallDir 被拼成 "路径 False"。此处强制修正，保证 irm|iex 与本地 -File 两种方式都正确。
+if ($InstallDir -isnot [string] -or $InstallDir -match '(False|\s)$') {
+    $InstallDir = Join-Path $env:USERPROFILE 'dsh-launcher'
+}
+$SkipPath = [bool]$SkipPath
 # —— 控制台编码修复 ——
 # 在代码页被切到 UTF-8(65001) 的传统控制台里，中文输出会出现“每个字重复”的重影 bug。
 # 这里把控制台代码页与输出编码统一回系统 ANSI 代码页（中文系统为 936/GBK）。
