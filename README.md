@@ -105,7 +105,8 @@ cd dsh-launcher
 | `uninstall.ps1` | 卸载：移除 PATH 注册（`-Full` 时同时删除快捷方式 / 日志 / 安装目录） |
 | `install-command.cmd` | 把脚本目录加入用户 PATH，注册 `deepseek` 命令 |
 | `VERSION` | 启动器版本号（`deepseek --version` 读取） |
-| `deepseek.ico` | DeepSeek 官方鲸鱼图标（16~256px 多尺寸，桌面快捷方式使用） |
+| `deepseek.ico` | DeepSeek Harness 黑色鲸鱼图标（16~256px 多尺寸，桌面快捷方式使用） |
+| `deepseek.svg` | 图标矢量源文件（取自 DSH web 前端 favicon，可用它重新生成 .ico） |
 
 ## 常见问题
 
