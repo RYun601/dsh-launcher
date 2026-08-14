@@ -1,5 +1,6 @@
 @echo off
-title DeepSeek Harness ºóÌ¨Æô¶¯
+chcp 65001 >nul
+title DeepSeek Harness åå°å¯åŠ¨
 cd /d "%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-background.ps1"
 echo.

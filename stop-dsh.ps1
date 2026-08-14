@@ -14,11 +14,24 @@ try {
 $conns = Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue
 if ($conns) {
     $pids = $conns | Select-Object -ExpandProperty OwningProcess -Unique
+    $stopped = @()
     foreach ($p in $pids) {
-        Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue
+        $cmdLine = if ($proc) { $proc.CommandLine } else { '' }
+        if ($cmdLine -match 'dsh|@deepseek-ai') {
+            Stop-Process -Id $p -Force -ErrorAction SilentlyContinue
+            $stopped += $p
+        } else {
+            $name = if ($proc) { $proc.Name } else { '未知进程' }
+            Write-Host "端口 3080 被其他程序占用（PID $p：$name），已跳过停止，请人工确认"
+        }
     }
-    Write-Host "已停止 DeepSeek Harness（PID：$($pids -join '、')）"
-    Write-Host "重新启动：deepseek -b（后台）或 deepseek（前台）"
+    if ($stopped) {
+        Write-Host "已停止 DeepSeek Harness（PID：$($stopped -join '、')）"
+        Write-Host "重新启动：deepseek -b（后台）或 deepseek（前台）"
+    } else {
+        Write-Host "端口 3080 无 DeepSeek Harness 进程，未执行停止"
+    }
 } else {
     Write-Host "未检测到运行中的 DeepSeek Harness（端口 3080 无监听）"
     Write-Host "启动：deepseek -b（后台）或 deepseek（前台）"

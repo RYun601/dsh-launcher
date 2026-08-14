@@ -2,10 +2,11 @@
 # 用法（PowerShell）：
 #   irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
 # 可选参数（先下载到本地再运行）：
-#   .\install.ps1 -InstallDir <目标目录> -SkipPath
+#   .\install.ps1 -InstallDir <目标目录> -SkipPath -Shortcut
 param(
     [string]$InstallDir = (Join-Path $env:USERPROFILE 'dsh-launcher'),
-    [switch]$SkipPath
+    [switch]$SkipPath,
+    [switch]$Shortcut
 )
 # —— iex 管道防御 ——
 # 通过 `irm | iex` 执行时，若脚本文本以 BOM 字符(U+FEFF)开头，Windows PowerShell 5.1 会忽略 param() 块，
@@ -29,6 +30,24 @@ try {
 } catch { }
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# —— Node.js 环境预检 ——
+Write-Host '正在检查 Node.js 环境...'
+$nodeVer = $null
+try { $nodeVer = & node --version 2>$null } catch { }
+if (-not $nodeVer) {
+    Write-Host '未检测到 Node.js！请先安装 Node.js LTS：https://nodejs.org'
+    Write-Host '安装完成后重新运行本脚本。'
+    exit 1
+}
+Write-Host "Node.js $nodeVer"
+$npxVer = $null
+try { $npxVer = & npx --version 2>$null } catch { }
+if (-not $npxVer) {
+    Write-Host '未检测到 npx！请重新安装 Node.js（通常自带 npx）：https://nodejs.org'
+    exit 1
+}
+Write-Host "npx $npxVer"
 
 $api = 'https://api.github.com/repos/RYun601/dsh-launcher/releases/latest'
 Write-Host '正在获取最新版本信息...'
@@ -59,6 +78,20 @@ if (-not $SkipPath) {
         [Environment]::SetEnvironmentVariable('Path', (($p.TrimEnd(';')) + ';' + $target), 'User')
         Write-Host "已添加到用户 PATH：$target"
     }
+}
+
+if ($Shortcut) {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+    $lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
+    $ws = New-Object -ComObject WScript.Shell
+    $lnk = $ws.CreateShortcut($lnkPath)
+    $lnk.TargetPath = 'powershell.exe'
+    $lnk.Arguments = "-NoProfile -WindowStyle Hidden -Command `"cmd /c `"`"$InstallDir\deepseek.cmd`"`" -b`""
+    $lnk.IconLocation = "$InstallDir\deepseek.ico,0"
+    $lnk.WorkingDirectory = $InstallDir
+    $lnk.Description = 'DeepSeek Harness (background mode)'
+    $lnk.Save()
+    Write-Host "已创建桌面快捷方式：$lnkPath（后台模式，双击即启动）"
 }
 
 Write-Host ''

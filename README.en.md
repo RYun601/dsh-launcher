@@ -46,6 +46,9 @@ irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | ie
 
 Downloads the latest Release, extracts it to `%USERPROFILE%\dsh-launcher`, and registers the `deepseek` command automatically.
 
+> Optional: download the script locally to pass parameters, e.g. `.\install.ps1 -Shortcut` creates a
+> "DeepSeek Harness" desktop shortcut (background mode, double-click to start).
+
 ### Option 2: Manual install
 
 1. Download `dsh-launcher.zip` from [Releases](https://github.com/RYun601/dsh-launcher/releases) and extract it
@@ -74,11 +77,15 @@ After completing the installation above (any option) and opening a **new** termi
 | Command | Description |
 | --- | --- |
 | `deepseek` | Foreground mode (default): shows logs in a window; close the window or press Ctrl+C to stop |
-| `deepseek -b` / `--background` / `--bg` | Background mode: keeps running without a window; browser opens automatically when ready |
-| `deepseek --status` | Show service state (`RUNNING - PID xxxx` / `NOT RUNNING`) |
-| `deepseek --stop` | Stop the service (finds the process by port 3080) and reminds you how to restart |
+| `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | Background mode: keeps running without a window; browser opens automatically when ready |
+| `deepseek --status` | Show service state (`RUNNING (ready)` / `RUNNING (starting)` / `NOT RUNNING`) |
+| `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart |
+| `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
+| `deepseek --version` | Show launcher version and local DeepSeek Harness version |
 | `deepseek --update` | Compare the local version with the latest on npm and show how to update |
+| `deepseek --upgrade` | One-click upgrade: stop service, clear npx cache, restart in background |
 | `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
+| `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + log dir + install dir (with confirmation) |
 | `deepseek --check` | Environment self-check (script path / npx / port) |
 | `deepseek --help` | Show help |
 
@@ -97,9 +104,11 @@ After completing the installation above (any option) and opening a **new** termi
 | `open-when-ready.ps1` | Polls the port and opens the browser when the service is ready (900-second timeout) |
 | `background-run.cmd` | Actual executor for background mode: merges output into the log with a timestamp header |
 | `update-check.ps1` | Version comparison: local npx cache vs latest on npm |
-| `uninstall.ps1` | Removes this folder from the user PATH |
+| `upgrade-dsh.ps1` | One-click upgrade: stop service, clear npx cache, restart in background |
+| `uninstall.ps1` | Uninstall: remove PATH registration (`-Full` also removes shortcut / logs / install dir) |
 | `install-command.cmd` | Adds this folder to the user PATH and registers the `deepseek` command |
-| `deepseek.ico` | Official DeepSeek whale icon (16-256px, multiple sizes) |
+| `VERSION` | Launcher version (read by `deepseek --version`) |
+| `deepseek.ico` | Official DeepSeek whale icon (16-256px, multiple sizes; used by the desktop shortcut) |
 
 ## FAQ
 

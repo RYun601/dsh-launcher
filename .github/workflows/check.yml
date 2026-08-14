@@ -16,7 +16,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','update-check.ps1','open-when-ready.ps1')
+          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
@@ -43,4 +43,46 @@ jobs:
           grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
           grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
           grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
+          grep -q -- '--upgrade' deepseek.cmd || { echo "::error::deepseek.cmd missing --upgrade"; exit 1; }
+          grep -q -- '--logs' deepseek.cmd || { echo "::error::deepseek.cmd missing --logs"; exit 1; }
+          grep -q -- '--version' deepseek.cmd || { echo "::error::deepseek.cmd missing --version"; exit 1; }
+          test -f VERSION || { echo "::error::VERSION file missing"; exit 1; }
           echo "cmd files OK"
+
+  functional:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Simulate BOM-prefixed irm|iex in PS 5.1 and verify InstallDir defense
+        shell: pwsh
+        run: |
+          $lines = Get-Content install.ps1
+          $start = ($lines | Select-String '^param\(').LineNumber
+          $end   = ($lines | Select-String '^\$SkipPath = \[bool\]').LineNumber
+          if (-not $start -or -not $end) { throw 'param/defense markers not found in install.ps1' }
+          $body = ($lines[($start-1)..($end-1)] -join "`n") + "`nWrite-Output ('CHECK=' + `$InstallDir)"
+          $script = [string][char]0xFEFF + $body
+          $tmp = Join-Path $env:TEMP 'bom-sim.ps1'
+          [System.IO.File]::WriteAllText($tmp, $script, (New-Object System.Text.UTF8Encoding($false)))
+          $out = powershell.exe -NoProfile -Command "iex (Get-Content -Raw -Encoding UTF8 '$tmp')" 2>&1
+          $out | ForEach-Object { Write-Host $_ }
+          if ($out -notmatch 'CHECK=.*dsh-launcher' -or $out -match 'CHECK=.*False') {
+            throw "BOM defense FAILED - output was: $out"
+          }
+          Write-Host 'BOM defense OK'
+
+      - name: Positive control - plain iex binds param defaults
+        shell: pwsh
+        run: |
+          $lines = Get-Content install.ps1
+          $start = ($lines | Select-String '^param\(').LineNumber
+          $end   = ($lines | Select-String '^\$SkipPath = \[bool\]').LineNumber
+          $body = ($lines[($start-1)..($end-1)] -join "`n") + "`nWrite-Output ('CHECK=' + `$InstallDir)"
+          $tmp = Join-Path $env:TEMP 'plain-sim.ps1'
+          [System.IO.File]::WriteAllText($tmp, $body, (New-Object System.Text.UTF8Encoding($false)))
+          $out = powershell.exe -NoProfile -Command "iex (Get-Content -Raw -Encoding UTF8 '$tmp')" 2>&1
+          $out | ForEach-Object { Write-Host $_ }
+          if ($out -notmatch 'CHECK=.*dsh-launcher') { throw "plain iex FAILED: $out" }
+          Write-Host 'plain iex OK'

@@ -19,7 +19,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','update-check.ps1','open-when-ready.ps1')
+          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
@@ -53,8 +53,8 @@ jobs:
           mkdir -p dist/dsh-launcher
           cp deepseek.cmd install-command.cmd start-deepseek-harness.bat \
              start-background.cmd start-background.ps1 stop-dsh.cmd stop-dsh.ps1 \
-             open-when-ready.ps1 background-run.cmd install.ps1 update-check.ps1 uninstall.ps1 \
-             deepseek.ico README.md README.en.md dist/dsh-launcher/
+             open-when-ready.ps1 background-run.cmd install.ps1 update-check.ps1 uninstall.ps1 upgrade-dsh.ps1 \
+             deepseek.ico README.md README.en.md VERSION dist/dsh-launcher/
           # Windows 批处理文件必须使用 CRLF 行尾
           sed -i 's/$/\r/' dist/dsh-launcher/*.cmd dist/dsh-launcher/*.bat
           cd dist && zip -r dsh-launcher.zip dsh-launcher

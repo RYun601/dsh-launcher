@@ -15,14 +15,16 @@ try {
 $local = $null
 $cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'
 if (Test-Path $cacheRoot) {
-    Get-ChildItem $cacheRoot -Recurse -Filter package.json -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -like '*@deepseek-ai\dsh*' } |
-        ForEach-Object {
+    # 定向扫描：只查 _npx\<hash>\node_modules\@deepseek-ai\dsh\package.json，避免全量递归
+    Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+        $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'
+        if (Test-Path $pj) {
             try {
-                $j = Get-Content $_.FullName -Raw | ConvertFrom-Json
+                $j = Get-Content $pj -Raw | ConvertFrom-Json
                 if ($j.name -eq '@deepseek-ai/dsh' -and $j.version) { $local = $j.version }
             } catch { }
         }
+    }
 }
 if (-not $local) { $local = 'unknown' }
 Write-Host "本地版本：$local"
@@ -33,7 +35,7 @@ if ($latest) {
     Write-Host "最新版本：$latest"
     if ($local -ne 'unknown' -and $local -ne $latest) {
         Write-Host ""
-        Write-Host "有新版本可用！更新方法："
+        Write-Host "有新版本可用！执行 deepseek --upgrade 一键升级，或手动操作："
         Write-Host "  1. 停止服务：deepseek --stop"
         Write-Host "  2. 删除 npx 缓存目录：$cacheRoot"
         Write-Host "  3. 重新运行 deepseek -b（会自动下载最新版）"

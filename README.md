@@ -45,6 +45,8 @@ irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | ie
 
 自动完成：下载最新 Release → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
 
+> 可选：先下载到本地再运行，可带参数，例如 `.install.ps1 -Shortcut` 会在桌面创建「DeepSeek Harness」快捷方式（后台模式，双击即启动）。
+
 ### 方式二：手动安装
 
 1. 从 [Releases](https://github.com/RYun601/dsh-launcher/releases) 下载 `dsh-launcher.zip` 并解压
@@ -73,10 +75,14 @@ cd dsh-launcher
 | --- | --- |
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：无窗口持续运行，服务就绪后浏览器自动打开 |
-| `deepseek --status` | 查看服务状态（`RUNNING - PID xxxx` / `NOT RUNNING`） |
-| `deepseek --stop` | 停止服务（按端口 3080 定位进程），并提示重新启动命令 |
+| `deepseek --status` | 查看服务状态（`RUNNING (ready)` / `RUNNING (starting)` / `NOT RUNNING`） |
+| `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令 |
+| `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
+| `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
+| `deepseek --upgrade` | 一键升级：停止服务 → 清理 npx 缓存 → 重新后台启动（自动下载最新版） |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
+| `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志目录 + 安装目录（带确认） |
 | `deepseek --check` | 环境自检（脚本路径 / npx / 端口） |
 | `deepseek --help` | 查看帮助 |
 
@@ -95,9 +101,11 @@ cd dsh-launcher
 | `open-when-ready.ps1` | 轮询探测端口，服务就绪后自动打开浏览器（900 秒超时保护） |
 | `background-run.cmd` | 后台模式的实际执行体：日志合并写入并带时间戳头 |
 | `update-check.ps1` | 版本对比：本地 npx 缓存 vs npm 最新版 |
-| `uninstall.ps1` | 从用户 PATH 移除本目录 |
+| `upgrade-dsh.ps1` | 一键升级：停止服务、清理 npx 缓存、重新后台启动 |
+| `uninstall.ps1` | 卸载：移除 PATH 注册（`-Full` 时同时删除快捷方式 / 日志 / 安装目录） |
 | `install-command.cmd` | 把脚本目录加入用户 PATH，注册 `deepseek` 命令 |
-| `deepseek.ico` | DeepSeek 官方鲸鱼图标（16~256px 多尺寸） |
+| `VERSION` | 启动器版本号（`deepseek --version` 读取） |
+| `deepseek.ico` | DeepSeek 官方鲸鱼图标（16~256px 多尺寸，桌面快捷方式使用） |
 
 ## 常见问题
 
