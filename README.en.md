@@ -21,6 +21,23 @@ is also supported.
 
 ## Installation
 
+### Prerequisite: Install DeepSeek Harness
+
+dsh-launcher is a launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness);
+DeepSeek Harness itself must be installed first (install commands from the official repo):
+
+1. Install [Node.js](https://nodejs.org) LTS
+2. Run:
+
+```sh
+npx @deepseek-ai/dsh web
+```
+
+3. The UI at http://127.0.0.1:3080 means the installation succeeded (press Ctrl+C to exit)
+
+> Note: dsh-launcher also downloads/reuses DeepSeek Harness via `npx --yes @deepseek-ai/dsh web`
+> on every start; running the command above beforehand verifies the environment and warms the cache.
+
 ### Option 1: One-line install via PowerShell (recommended)
 
 ```powershell
@@ -41,23 +58,6 @@ Downloads the latest Release, extracts it to `%USERPROFILE%\dsh-launcher`, and r
 git clone https://github.com/RYun601/dsh-launcher.git
 cd dsh-launcher
 ```
-
-### Prerequisite: Install DeepSeek Harness
-
-dsh-launcher is a launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness);
-DeepSeek Harness itself must be installed first (install commands from the official repo):
-
-1. Install [Node.js](https://nodejs.org) LTS
-2. Run:
-
-```sh
-npx @deepseek-ai/dsh web
-```
-
-3. The UI at http://127.0.0.1:3080 means the installation succeeded (press Ctrl+C to exit)
-
-> Note: dsh-launcher also downloads/reuses DeepSeek Harness via `npx --yes @deepseek-ai/dsh web`
-> on every start; running the command above beforehand verifies the environment and warms the cache.
 
 ## Quick Start
 
