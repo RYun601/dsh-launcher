@@ -1,4 +1,4 @@
-# dsh-launcher 一键安装脚本
+﻿# dsh-launcher 一键安装脚本
 # 用法（PowerShell）：
 #   irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
 # 可选参数（先下载到本地再运行）：
@@ -7,6 +7,19 @@ param(
     [string]$InstallDir = (Join-Path $env:USERPROFILE 'dsh-launcher'),
     [switch]$SkipPath
 )
+# —— 控制台编码修复 ——
+# 在代码页被切到 UTF-8(65001) 的传统控制台里，中文输出会出现“每个字重复”的重影 bug。
+# 这里把控制台代码页与输出编码统一回系统 ANSI 代码页（中文系统为 936/GBK）。
+try {
+    $__dsh_cp = [Globalization.CultureInfo]::CurrentCulture.TextInfo.ANSICodePage
+    if ($__dsh_cp -ne 65001) {
+        chcp $__dsh_cp | Out-Null
+        $__dsh_enc = [Text.Encoding]::GetEncoding($__dsh_cp)
+        [Console]::OutputEncoding = $__dsh_enc
+        [Console]::InputEncoding  = $__dsh_enc
+        $OutputEncoding = $__dsh_enc
+    }
+} catch { }
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 

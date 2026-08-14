@@ -4,7 +4,7 @@ cd /d "%USERPROFILE%"
 
 set "ARGS=%*"
 
-echo %ARGS% | findstr /i /c:"--background" /c:"-b" /c:"--bg" >nul 2>&1
+echo %ARGS% | findstr /i /c:"--background" /c:"-b" /c:"--bg" /c:"--daemon" /c:"-d" >nul 2>&1
 if not errorlevel 1 goto background
 
 echo %ARGS% | findstr /i /c:"--stop" /c:"stop" >nul 2>&1
@@ -67,7 +67,7 @@ exit /b 0
 :help
 echo Usage:
 echo   deepseek                start in foreground mode (default)
-echo   deepseek -b             start in background mode (keeps running)
+echo   deepseek -b / -d        start in background mode (keeps running)
 echo   deepseek --status       check if the service is running
 echo   deepseek --stop         stop the running service
 echo   deepseek --update       check for a newer DeepSeek Harness version

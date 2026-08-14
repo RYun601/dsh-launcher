@@ -72,7 +72,7 @@ npx @deepseek-ai/dsh web
 | 命令 | 说明 |
 | --- | --- |
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
-| `deepseek -b` / `--background` / `--bg` | 后台启动：无窗口持续运行，服务就绪后浏览器自动打开 |
+| `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：无窗口持续运行，服务就绪后浏览器自动打开 |
 | `deepseek --status` | 查看服务状态（`RUNNING - PID xxxx` / `NOT RUNNING`） |
 | `deepseek --stop` | 停止服务（按端口 3080 定位进程），并提示重新启动命令 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
