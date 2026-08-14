@@ -108,7 +108,8 @@ After completing the installation above (any option) and opening a **new** termi
 | `uninstall.ps1` | Uninstall: remove PATH registration (`-Full` also removes shortcut / logs / install dir) |
 | `install-command.cmd` | Adds this folder to the user PATH and registers the `deepseek` command |
 | `VERSION` | Launcher version (read by `deepseek --version`) |
-| `deepseek.ico` | Official DeepSeek whale icon (16-256px, multiple sizes; used by the desktop shortcut) |
+| `deepseek.ico` | DeepSeek Harness black whale icon (16-256px, multiple sizes; used by the desktop shortcut) |
+| `deepseek.svg` | Vector source of the icon (from the DSH web frontend favicon; regenerate the .ico from it) |
 
 ## FAQ
 
