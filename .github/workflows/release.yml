@@ -19,7 +19,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
+          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','set-shortcut.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
@@ -46,6 +46,8 @@ jobs:
           grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
           grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
           grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
+          grep -q -- '-WaitForReady -TimeoutSeconds 900' start-background.cmd || { echo "::error::start-background.cmd missing interactive wait mode"; exit 1; }
+          grep -q -- 'set-shortcut.ps1' install.ps1 || { echo "::error::install.ps1 missing shortcut migration helper"; exit 1; }
           echo "cmd files OK"
 
       - name: Prepare package
@@ -53,7 +55,7 @@ jobs:
           mkdir -p dist/dsh-launcher
           cp deepseek.cmd install-command.cmd start-deepseek-harness.bat \
              start-background.cmd start-background.ps1 stop-dsh.cmd stop-dsh.ps1 \
-             open-when-ready.ps1 background-run.cmd install.ps1 update-check.ps1 uninstall.ps1 upgrade-dsh.ps1 \
+             open-when-ready.ps1 background-run.cmd install.ps1 set-shortcut.ps1 update-check.ps1 uninstall.ps1 upgrade-dsh.ps1 \
              deepseek.ico README.md README.en.md VERSION dist/dsh-launcher/
           # Windows 批处理文件必须使用 CRLF 行尾
           sed -i 's/$/\r/' dist/dsh-launcher/*.cmd dist/dsh-launcher/*.bat
