@@ -59,10 +59,10 @@ exit /b 0
 
 :background
 echo Starting DeepSeek Harness (background)...
-echo Close this window anytime - the service keeps running.
+echo This command returns immediately; the browser opens when ready.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-background.ps1"
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-background.ps1" -TimeoutSeconds 900
+exit /b %ERRORLEVEL%
 
 :stop
 echo Stopping DeepSeek Harness...
@@ -106,7 +106,7 @@ exit /b 0
 :help
 echo Usage:
 echo   deepseek                start in foreground mode (default)
-echo   deepseek -b / -d        start in background mode (keeps running)
+echo   deepseek -b / -d        submit background startup and return immediately
 echo   deepseek --status       check service state (ready/starting/not running)
 echo   deepseek --stop         stop the running service
 echo   deepseek --logs [N]     show last N lines of the background log (default 20)

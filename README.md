@@ -13,8 +13,9 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 ## 功能特性
 
 - **命令行启动**：在 cmd / PowerShell 中输入 `deepseek` 即可启动
-- **前台 / 后台双模式**：前台显示运行日志（关窗即停）；后台无窗口持续运行（关任何窗口都不影响）
+- **前台 / 后台双模式**：前台显示运行日志（关窗即停）；`deepseek -b` 提交后台启动后立即返回
 - **自动打开浏览器**：服务就绪后自动打开 http://127.0.0.1:3080，无需手动输入地址
+- **快捷方式启动反馈**：显示启动进度，成功打开浏览器后自动关窗；失败时保留窗口与日志提示
 - **状态查询与停止**：`deepseek --status` 查看运行状态，`deepseek --stop` 一键停止并提示重启命令
 - **跨系统通用**：Win10 / Win11 均可使用
 
@@ -45,7 +46,7 @@ irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | ie
 
 自动完成：下载最新 Release → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
 
-> 可选：先下载到本地再运行，可带参数，例如 `.install.ps1 -Shortcut` 会在桌面创建「DeepSeek Harness」快捷方式（后台模式，双击即启动）。
+> 可选：先下载到本地再运行，可带参数，例如 `.\install.ps1 -Shortcut` 会在桌面创建「DeepSeek Harness」快捷方式。快捷方式显示启动进度，成功后自动关窗；重新运行安装器会自动迁移旧版快捷方式。
 
 ### 方式二：手动安装
 
@@ -64,7 +65,7 @@ cd dsh-launcher
 
 完成上方「安装」（任选一种方式）并**新开**一个终端窗口（使新 PATH 生效）后：
 
-1. 输入 `deepseek -b` 后台启动（或输入 `deepseek` 前台启动）
+1. 输入 `deepseek -b` 提交后台启动并立即返回（或输入 `deepseek` 前台启动）
 2. 首次运行会自动通过 `npx` 下载 DeepSeek Harness（需联网，约 1-2 分钟）
 3. 服务就绪后浏览器自动打开 http://127.0.0.1:3080
 4. 首次使用需要在 DeepSeek Harness 界面登录 / 填入 API Key
@@ -74,7 +75,7 @@ cd dsh-launcher
 | 命令 | 说明 |
 | --- | --- |
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
-| `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：无窗口持续运行，服务就绪后浏览器自动打开 |
+| `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：提交后立即返回，服务继续运行并在就绪后自动打开浏览器 |
 | `deepseek --status` | 查看服务状态（`RUNNING (ready)` / `RUNNING (starting)` / `NOT RUNNING`） |
 | `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令 |
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
@@ -88,7 +89,7 @@ cd dsh-launcher
 
 ## 其他启动方式
 
-- **直接运行脚本**：双击 `start-deepseek-harness.bat`（前台）或 `start-background.cmd`（后台）
+- **直接运行脚本**：双击 `start-deepseek-harness.bat`（前台）或 `start-background.cmd`（后台进度窗；成功自动关闭、失败保留）
 
 ## 文件说明
 
@@ -96,12 +97,13 @@ cd dsh-launcher
 | --- | --- |
 | `deepseek.cmd` | 命令行入口：前台 / 后台 / 停止 / 状态 / 自检 / 帮助 |
 | `start-deepseek-harness.bat` | 前台启动脚本（启动服务 + 自动打开浏览器） |
-| `start-background.cmd` / `.ps1` | 后台启动：无窗口运行，日志写入 `%USERPROFILE%\dsh-launch\dsh-background.log` |
+| `start-background.cmd` / `.ps1` | 后台启动协调器：支持立即返回或等待就绪，日志写入 `%USERPROFILE%\dsh-launch\dsh-background.log` |
 | `stop-dsh.cmd` / `.ps1` | 停止服务（按端口 3080 定位进程） |
-| `open-when-ready.ps1` | 轮询探测端口，服务就绪后自动打开浏览器（900 秒超时保护） |
+| `open-when-ready.ps1` | 轮询 HTTP 服务，确认就绪后自动打开浏览器（900 秒超时保护） |
 | `background-run.cmd` | 后台模式的实际执行体：日志合并写入并带时间戳头 |
 | `update-check.ps1` | 版本对比：本地 npx 缓存 vs npm 最新版 |
 | `upgrade-dsh.ps1` | 一键升级：停止服务、清理 npx 缓存、重新后台启动 |
+| `set-shortcut.ps1` | 创建或迁移桌面快捷方式，配置可见启动进度窗口 |
 | `uninstall.ps1` | 卸载：移除 PATH 注册（`-Full` 时同时删除快捷方式 / 日志 / 安装目录） |
 | `install-command.cmd` | 把脚本目录加入用户 PATH，注册 `deepseek` 命令 |
 | `VERSION` | 启动器版本号（`deepseek --version` 读取） |

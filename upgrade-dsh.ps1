@@ -39,4 +39,4 @@ if ($removed) {
 
 # 3) 重新后台启动（自动下载最新版 DSH）
 Write-Host '正在重新后台启动（会自动下载最新版 DSH）...'
-& (Join-Path $dir 'start-background.ps1')
+& (Join-Path $dir 'start-background.ps1') -WaitForReady -TimeoutSeconds 900

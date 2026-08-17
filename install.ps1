@@ -80,18 +80,25 @@ if (-not $SkipPath) {
     }
 }
 
-if ($Shortcut) {
-    $desktop = [Environment]::GetFolderPath('Desktop')
-    $lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
-    $ws = New-Object -ComObject WScript.Shell
-    $lnk = $ws.CreateShortcut($lnkPath)
-    $lnk.TargetPath = 'powershell.exe'
-    $lnk.Arguments = "-NoProfile -WindowStyle Hidden -Command `"cmd /c `"`"$InstallDir\deepseek.cmd`"`" -b`""
-    $lnk.IconLocation = "$InstallDir\deepseek.ico,0"
-    $lnk.WorkingDirectory = $InstallDir
-    $lnk.Description = 'DeepSeek Harness (background mode)'
-    $lnk.Save()
-    Write-Host "已创建桌面快捷方式：$lnkPath（后台模式，双击即启动）"
+$desktop = [Environment]::GetFolderPath('Desktop')
+$lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
+$shortcutExists = Test-Path -LiteralPath $lnkPath
+if ($Shortcut -or $shortcutExists) {
+    $shortcutScript = Join-Path $InstallDir 'set-shortcut.ps1'
+    if (-not (Test-Path -LiteralPath $shortcutScript)) {
+        throw "安装失败：未找到快捷方式配置脚本 $shortcutScript"
+    }
+
+    $shortcutResult = [string](& $shortcutScript -InstallDir $InstallDir -ShortcutPath $lnkPath -Create:$Shortcut)
+    if ($shortcutResult -like 'CREATED:*') {
+        Write-Host "已创建桌面快捷方式：$lnkPath（显示启动进度，成功后自动关闭）"
+    } elseif ($shortcutResult -like 'UPDATED:*') {
+        Write-Host "已更新桌面快捷方式：$lnkPath（显示启动进度，成功后自动关闭）"
+    } elseif ($Shortcut) {
+        throw "桌面快捷方式创建失败：$lnkPath"
+    } else {
+        Write-Host "检测到非本启动器管理的同名快捷方式，已保留：$lnkPath"
+    }
 }
 
 Write-Host ''
