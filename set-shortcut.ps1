@@ -10,7 +10,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $description = 'DeepSeek Harness (background mode)'
-$normalizedInstallDir = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+$normalizedInstallDir = (Get-Item -LiteralPath ([IO.Path]::GetFullPath($InstallDir))).FullName.TrimEnd('\')
 $normalizedShortcutPath = [IO.Path]::GetFullPath($ShortcutPath)
 $wrapperPath = Join-Path $normalizedInstallDir 'start-background.cmd'
 $iconPath = Join-Path $normalizedInstallDir 'deepseek.ico'
@@ -25,11 +25,15 @@ $action = 'CREATED'
 
 if ($shortcutExists) {
     $existing = $shell.CreateShortcut($normalizedShortcutPath)
-    $sameWorkingDirectory = [string]::Equals(
-        $existing.WorkingDirectory.TrimEnd('\'),
-        $normalizedInstallDir,
-        [StringComparison]::OrdinalIgnoreCase
-    )
+    $sameWorkingDirectory = $false
+    if ($existing.WorkingDirectory -and (Test-Path -LiteralPath $existing.WorkingDirectory -PathType Container)) {
+        $normalizedWorkingDirectory = (Get-Item -LiteralPath $existing.WorkingDirectory).FullName.TrimEnd('\')
+        $sameWorkingDirectory = [string]::Equals(
+            $normalizedWorkingDirectory,
+            $normalizedInstallDir,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
     $recognized = $existing.Description -eq $description -and $sameWorkingDirectory
 
     if (-not $Create -and -not $recognized) {

@@ -12,23 +12,25 @@ function Assert-True {
     if (-not $Condition) { throw $Message }
 }
 
-function Assert-Equal {
-    param([string]$Expected, [string]$Actual, [string]$Message)
-    if ($Expected -cne $Actual) {
-        throw "$Message`nExpected: $Expected`nActual:   $Actual"
-    }
-}
-
 function Assert-PathEqual {
     param([string]$Expected, [string]$Actual, [string]$Message)
     $matches = [string]::Equals(
-        [IO.Path]::GetFullPath($Expected).TrimEnd('\'),
-        [IO.Path]::GetFullPath($Actual).TrimEnd('\'),
+        (Get-Item -LiteralPath $Expected).FullName.TrimEnd('\'),
+        (Get-Item -LiteralPath $Actual).FullName.TrimEnd('\'),
         [StringComparison]::OrdinalIgnoreCase
     )
     if (-not $matches) {
         throw "$Message`nExpected: $Expected`nActual:   $Actual"
     }
+}
+
+function Assert-ShortcutCommand {
+    param([string]$ExpectedPath, [string]$Actual, [string]$Message)
+    $commandMatch = [regex]::Match($Actual, '^/d /c ""(?<Path>[^"]+)""$')
+    if (-not $commandMatch.Success) {
+        throw "$Message`nUnexpected command arguments: $Actual"
+    }
+    Assert-PathEqual $ExpectedPath $commandMatch.Groups['Path'].Value $Message
 }
 
 function Invoke-Test {
@@ -57,7 +59,7 @@ try {
 
         $shortcut = Read-Shortcut -Path $shortcutPath
         Assert-PathEqual $env:ComSpec $shortcut.TargetPath 'Shortcut should target the visible Windows command processor'
-        Assert-Equal ('/d /c ""{0}""' -f (Join-Path $installDir 'start-background.cmd')) $shortcut.Arguments 'Shortcut should launch start-background.cmd with safe quoting'
+        Assert-ShortcutCommand (Join-Path $installDir 'start-background.cmd') $shortcut.Arguments 'Shortcut should launch start-background.cmd with safe quoting'
         Assert-PathEqual $installDir $shortcut.WorkingDirectory 'Shortcut should use the install directory'
         Assert-True ($output -match '^CREATED:') 'Shortcut creation should report CREATED'
     }
