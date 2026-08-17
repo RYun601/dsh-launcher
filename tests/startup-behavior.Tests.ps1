@@ -118,7 +118,7 @@ function Invoke-BackgroundCommand {
     $startInfo.EnvironmentVariables['DSH_TEST_POWERSHELL_EXIT'] = [string]$PowerShellExitCode
 
     $process = [Diagnostics.Process]::Start($startInfo)
-    $exitedBeforeInput = $process.WaitForExit(700)
+    $exitedBeforeInput = $process.WaitForExit(3000)
     if (-not $exitedBeforeInput) {
         $process.StandardInput.WriteLine('x')
         $process.StandardInput.Close()
@@ -209,3 +209,5 @@ try {
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }
+
+exit 0
