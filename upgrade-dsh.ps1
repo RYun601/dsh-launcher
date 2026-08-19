@@ -1,4 +1,4 @@
-﻿# —— 控制台编码修复 ——
+# —— 控制台编码修复 ——
 # 在代码页被切到 UTF-8(65001) 的传统控制台里，中文输出会出现“每个字重复”的重影 bug。
 # 这里把控制台代码页与输出编码统一回系统 ANSI 代码页（中文系统为 936/GBK）。
 try {
@@ -19,7 +19,9 @@ Write-Host '正在停止服务...'
 & (Join-Path $dir 'stop-dsh.ps1')
 
 # 2) 删除 npx 缓存中的 dsh 包（下次启动自动下载最新版）
-$cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache_npx'
+# ⚠️ 路径必须是 npm-cache\_npx（反斜杠不能省）：npm-cache_npx 是错误目录，
+#    Test-Path 永远为 False → 清缓存静默跳过 → --upgrade 实际装的还是旧版。
+$cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'
 $removed = @()
 if (Test-Path $cacheRoot) {
     Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {

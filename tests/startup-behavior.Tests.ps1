@@ -133,13 +133,14 @@ function Invoke-BackgroundCommand {
 }
 
 function Invoke-DeepseekCommand {
+    param([string]$Argument = '-b')
     $fakeBin = Get-FakePowerShellBin
     $profilePath = Join-Path $testRoot 'deepseek-profile'
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = 'cmd.exe'
-    $startInfo.Arguments = '/d /c deepseek.cmd -b'
+    $startInfo.Arguments = '/d /c deepseek.cmd ' + $Argument
     $startInfo.WorkingDirectory = $repoRoot
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
@@ -149,7 +150,7 @@ function Invoke-DeepseekCommand {
     $startInfo.EnvironmentVariables['DSH_TEST_POWERSHELL_EXIT'] = '0'
 
     $process = [Diagnostics.Process]::Start($startInfo)
-    Assert-True ($process.WaitForExit(3000)) 'deepseek -b did not return promptly'
+    Assert-True ($process.WaitForExit(3000)) "deepseek $Argument did not return promptly"
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
         Output   = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
@@ -171,6 +172,28 @@ try {
         Assert-Equal 0 $result.ExitCode 'deepseek -b should preserve a successful launch exit code'
         Assert-NotMatch $result.Output 'Close this window anytime' 'deepseek -b should not print the stale waiting-window message'
         Assert-Match $result.Output 'start-background\.ps1.*-TimeoutSeconds 900' 'deepseek -b should submit startup with the approved monitor timeout'
+    }
+
+    Invoke-Test 'unknown arguments are rejected with an error, never silently launched' {
+        $result = Invoke-DeepseekCommand -Argument '--totally-unknown-flag'
+        Assert-Equal 1 $result.ExitCode 'unknown argument should exit with code 1'
+        Assert-Match $result.Output 'Unknown argument' 'should name the bad token'
+        Assert-Match $result.Output 'Usage:' 'should print the help block'
+        Assert-NotMatch $result.Output 'start-background\.ps1' 'must not dispatch to background start'
+        Assert-NotMatch $result.Output 'Starting DeepSeek Harness' 'must not fall through to foreground launch'
+    }
+
+    Invoke-Test 'bare --full is rejected (only valid together with --uninstall)' {
+        $result = Invoke-DeepseekCommand -Argument '--full'
+        Assert-Equal 1 $result.ExitCode 'bare --full should exit with code 1'
+        Assert-Match $result.Output '--uninstall' 'error should point at the correct usage'
+        Assert-NotMatch $result.Output 'uninstall\.ps1' 'must not dispatch to the uninstaller'
+    }
+
+    Invoke-Test '--full with --uninstall still dispatches to the uninstaller' {
+        $result = Invoke-DeepseekCommand -Argument '--uninstall --full'
+        Assert-Equal 0 $result.ExitCode '--uninstall --full should dispatch normally'
+        Assert-Match $result.Output 'uninstall\.ps1' 'should invoke the full uninstaller'
     }
 
     Invoke-Test 'shortcut wait mode opens the browser before returning success' {

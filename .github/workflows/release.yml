@@ -48,6 +48,11 @@ jobs:
           grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
           grep -q -- '-WaitForReady -TimeoutSeconds 900' start-background.cmd || { echo "::error::start-background.cmd missing interactive wait mode"; exit 1; }
           grep -q -- 'set-shortcut.ps1' install.ps1 || { echo "::error::install.ps1 missing shortcut migration helper"; exit 1; }
+          # 回归防护（P0 教训）：upgrade-dsh.ps1 的缓存清理路径必须指向真实目录
+          # npm-cache\_npx（少反斜杠 → Test-Path 恒 False → --upgrade 静默失效）
+          grep -q 'npm-cache\\_npx' upgrade-dsh.ps1 || { echo "::error::upgrade-dsh.ps1 must clear the REAL npx cache dir (npm-cache\\_npx)"; exit 1; }
+          # 回归防护（P1 教训）：deepseek.cmd 必须保留未知参数白名单校验块
+          grep -q 'BADARG' deepseek.cmd || { echo "::error::deepseek.cmd missing unknown-argument validation"; exit 1; }
           echo "cmd files OK"
 
       - name: Prepare package
