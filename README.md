@@ -21,22 +21,34 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 
 ## 安装
 
-### 前置条件：安装 DeepSeek Harness
+### 前置条件：安装 Node.js
 
 dsh-launcher 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的启动器，
-需先安装 DSH 本体（安装命令参考官方仓库）：
+只需先安装 Node.js；首次运行 `deepseek` 时，启动器会通过 `npx` 自动下载并启动 DSH 本体。
 
 1. 安装 [Node.js](https://nodejs.org) LTS
-2. 运行：
+
+> 首次启动需要联网。Node.js 通常自带 npm 和 npx；若安装器提示未检测到 npx，请重新安装 Node.js LTS。
+
+### 可选：安装官方 DSH CLI
+
+只有需要在任意终端直接使用官方 `dsh` 命令时，才需要全局安装 DSH CLI：
 
 ```sh
-npx @deepseek-ai/dsh web
+npm install -g @deepseek-ai/dsh
 ```
 
-3. 浏览器打开 http://127.0.0.1:3080 看到界面即安装成功（Ctrl+C 退出）
+新开一个终端后，可运行：
 
-> 说明：dsh-launcher 每次启动也会通过 `npx --yes @deepseek-ai/dsh web` 自动下载 / 复用 DSH；
-> 提前执行上面的命令可以验证环境并预先缓存组件。
+```sh
+dsh web
+```
+
+浏览器打开 http://127.0.0.1:3080 看到界面即启动成功（Ctrl+C 退出）。
+
+> `npm install -g @deepseek-ai/dsh` 会在 npm 的全局可执行目录注册 `dsh`（Windows 中为 `dsh.cmd`）。正常安装的 Node.js 会把该目录加入 PATH；若新开终端后仍提示找不到 `dsh`，请检查 npm 全局目录是否在 PATH 中。
+>
+> `npx @deepseek-ai/dsh web` 能直接启动 DSH，但不会注册可在任意终端使用的 `dsh` 命令。dsh-launcher 自身通过 `npx --yes @deepseek-ai/dsh web` 启动，因此无需全局安装 DSH CLI。
 
 ### 方式一：PowerShell 一行命令（推荐）
 
@@ -46,7 +58,21 @@ irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | ie
 
 自动完成：下载最新 Release → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
 
-> 可选：先下载到本地再运行，可带参数，例如 `.\install.ps1 -Shortcut` 会在桌面创建「DeepSeek Harness」快捷方式。快捷方式显示启动进度，成功后自动关窗；重新运行安装器会自动迁移旧版快捷方式。
+> 默认不创建桌面快捷方式。需要快捷方式时，请在同一个 PowerShell 窗口依次执行以下两步：
+>
+> 1. 下载安装脚本到当前目录：
+>
+>    ```powershell
+>    irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 -OutFile .\install.ps1
+>    ```
+>
+> 2. 执行该脚本，并传入 `-Shortcut` 参数：
+>
+>    ```powershell
+>    .\install.ps1 -Shortcut
+>    ```
+>
+> `-Shortcut`：在桌面创建「DeepSeek Harness」快捷方式，点击后以后台模式启动并显示启动进度；启动成功后窗口自动关闭。再次使用该参数会更新同名快捷方式；不带该参数时，安装器不会新建快捷方式。
 
 ### 方式二：手动安装
 

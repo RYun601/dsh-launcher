@@ -22,22 +22,34 @@ is also supported.
 
 ## Installation
 
-### Prerequisite: Install DeepSeek Harness
+### Prerequisite: Install Node.js
 
 dsh-launcher is a launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness);
-DeepSeek Harness itself must be installed first (install commands from the official repo):
+dsh-launcher only requires Node.js. On the first `deepseek` run, it downloads and starts DeepSeek Harness through `npx`.
 
 1. Install [Node.js](https://nodejs.org) LTS
-2. Run:
+
+> The first launch requires an internet connection. Node.js normally includes npm and npx; if the installer cannot find npx, reinstall Node.js LTS.
+
+### Optional: Install the official DSH CLI
+
+Install the DSH CLI globally only if you want to use the official `dsh` command directly from any terminal:
 
 ```sh
-npx @deepseek-ai/dsh web
+npm install -g @deepseek-ai/dsh
 ```
 
-3. The UI at http://127.0.0.1:3080 means the installation succeeded (press Ctrl+C to exit)
+Open a new terminal, then run:
 
-> Note: dsh-launcher also downloads/reuses DeepSeek Harness via `npx --yes @deepseek-ai/dsh web`
-> on every start; running the command above beforehand verifies the environment and warms the cache.
+```sh
+dsh web
+```
+
+The UI at http://127.0.0.1:3080 means it started successfully (press Ctrl+C to exit).
+
+> `npm install -g @deepseek-ai/dsh` registers `dsh` in npm's global executable directory (as `dsh.cmd` on Windows). A standard Node.js installation adds that directory to PATH; if `dsh` is still not found in a new terminal, check that the npm global directory is on PATH.
+>
+> `npx @deepseek-ai/dsh web` can start DSH directly, but does not register the `dsh` command for use in any terminal. dsh-launcher uses `npx --yes @deepseek-ai/dsh web`, so the global DSH CLI is not required.
 
 ### Option 1: One-line install via PowerShell (recommended)
 
@@ -47,9 +59,21 @@ irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | ie
 
 Downloads the latest Release, extracts it to `%USERPROFILE%\dsh-launcher`, and registers the `deepseek` command automatically.
 
-> Optional: download the script locally to pass parameters, e.g. `.\install.ps1 -Shortcut` creates a
-> "DeepSeek Harness" desktop shortcut. It shows startup progress and closes automatically on success;
-> rerunning the installer also migrates a launcher-managed legacy shortcut.
+> A desktop shortcut is not created by default. To create one, run these two steps in the same PowerShell window:
+>
+> 1. Download the installer script to the current directory:
+>
+>    ```powershell
+>    irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 -OutFile .\install.ps1
+>    ```
+>
+> 2. Run the script with the `-Shortcut` parameter:
+>
+>    ```powershell
+>    .\install.ps1 -Shortcut
+>    ```
+>
+> `-Shortcut`: creates a "DeepSeek Harness" desktop shortcut. It starts in background mode, shows startup progress, and closes automatically after a successful start. Running the installer with this parameter again updates the shortcut; without it, the installer does not create a shortcut.
 
 ### Option 2: Manual install
 

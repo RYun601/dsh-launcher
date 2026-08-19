@@ -64,7 +64,6 @@ $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', "`"$dir\background
 
 # 3) 命令行后台模式：提交启动后立即返回，由独立监视器负责就绪后打开浏览器
 if (-not $WaitForReady) {
-    Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$dir\open-when-ready.ps1`"",'-TimeoutSeconds',[string]$TimeoutSeconds -WindowStyle Hidden
     Write-Host "DeepSeek Harness 后台启动已提交（PID $($proc.Id)）"
     Write-Host "服务就绪后浏览器将自动打开 $url"
     Write-Host '查看状态：deepseek --status'

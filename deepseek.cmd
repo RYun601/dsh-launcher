@@ -4,12 +4,10 @@ cd /d "%USERPROFILE%"
 
 set "ARGS=%*"
 
-rem ── 参数白名单校验（P1 修复）──────────────────────────────────────
-rem 历史债：下方分发用 findstr 子串匹配（如 /c:"-b"），任何新参数只要
-rem 含 "-b" 子串就会误入后台模式，且错拼参数会静默落到前台、真的把
-rem 服务拉起来。这里逐 token 白名单校验：未知参数 → 报错 + 帮助 + 退出。
-rem 数字 token 仅用于 --logs [N]；--full 只允许与 --uninstall 同用
-rem （裸 --full 此前会直接触发完整卸载，属误触雷区）。
+rem Validate every token before dispatching.  The findstr checks below use
+rem substring matching, so unknown options could otherwise trigger a mode
+rem accidentally.  Numeric tokens are accepted only for --logs [N]; --full
+rem is valid only together with --uninstall.
 set "BADARG="
 if defined ARGS (
     for %%a in (%ARGS%) do (
@@ -147,8 +145,8 @@ echo   deepseek --uninstall    remove this command from PATH
 echo   deepseek --uninstall --full   remove everything (PATH, install dir, logs, shortcut)
 echo   deepseek --check        check environment and exit
 echo   deepseek --help         show this help
-rem 用 goto :eof 而非 exit /b 0：call :help（参数校验失败路径）需要返回后
-rem 以 exit /b 1 退出；goto help 顶层路径的退出码取当前 errorlevel（=0）。
+rem call :help must return to the validation error path, so do not exit here.
+rem The top-level goto help path preserves the current success errorlevel.
 goto :eof
 
 :check
