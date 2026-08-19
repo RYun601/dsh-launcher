@@ -4,6 +4,36 @@ cd /d "%USERPROFILE%"
 
 set "ARGS=%*"
 
+rem ── 参数白名单校验（P1 修复）──────────────────────────────────────
+rem 历史债：下方分发用 findstr 子串匹配（如 /c:"-b"），任何新参数只要
+rem 含 "-b" 子串就会误入后台模式，且错拼参数会静默落到前台、真的把
+rem 服务拉起来。这里逐 token 白名单校验：未知参数 → 报错 + 帮助 + 退出。
+rem 数字 token 仅用于 --logs [N]；--full 只允许与 --uninstall 同用
+rem （裸 --full 此前会直接触发完整卸载，属误触雷区）。
+set "BADARG="
+if defined ARGS (
+    for %%a in (%ARGS%) do (
+        echo(%%a| findstr /i /r /c:"^--background$" /c:"^-b$" /c:"^--bg$" /c:"^--daemon$" /c:"^-d$" /c:"^--full$" /c:"^--stop$" /c:"^stop$" /c:"^--status$" /c:"^--logs$" /c:"^[0-9][0-9]*$" /c:"^--upgrade$" /c:"^--update$" /c:"^update$" /c:"^--version$" /c:"^--uninstall$" /c:"^uninstall$" /c:"^--help$" /c:"^-h$" /c:"^/\?$" /c:"^--check$" >nul 2>&1
+        if errorlevel 1 set "BADARG=%%a"
+    )
+)
+if defined BADARG (
+    echo [ERROR] Unknown argument: %BADARG%
+    echo.
+    call :help
+    exit /b 1
+)
+echo %ARGS% | findstr /i /c:"--full" >nul 2>&1
+if not errorlevel 1 (
+    echo %ARGS% | findstr /i /c:"--uninstall" >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] --full is only valid together with --uninstall
+        echo.
+        call :help
+        exit /b 1
+    )
+)
+
 echo %ARGS% | findstr /i /c:"--background" /c:"-b" /c:"--bg" /c:"--daemon" /c:"-d" >nul 2>&1
 if not errorlevel 1 goto background
 
@@ -77,7 +107,7 @@ exit /b 0
 for /f "tokens=2" %%n in ("%ARGS%") do set "LOGN=%%n"
 echo %LOGN% | findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
 if not errorlevel 1 (set "COUNT=%LOGN%") else (set "COUNT=20")
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'; if (Test-Path $log) { Get-Content $log -Tail %COUNT% } else { Write-Host ('No log yet: ' + $log) }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'; if (Test-Path $log) { Get-Content $log -Tail %COUNT% -Encoding UTF8 } else { Write-Host ('No log yet: ' + $log) }"
 exit /b 0
 
 :upgrade
@@ -117,7 +147,9 @@ echo   deepseek --uninstall    remove this command from PATH
 echo   deepseek --uninstall --full   remove everything (PATH, install dir, logs, shortcut)
 echo   deepseek --check        check environment and exit
 echo   deepseek --help         show this help
-exit /b 0
+rem 用 goto :eof 而非 exit /b 0：call :help（参数校验失败路径）需要返回后
+rem 以 exit /b 1 退出；goto help 顶层路径的退出码取当前 errorlevel（=0）。
+goto :eof
 
 :check
 echo deepseek.cmd: OK
