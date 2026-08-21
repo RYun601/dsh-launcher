@@ -193,18 +193,24 @@ try {
             Write-Output "Validating existing DeepSeek Harness runtime $Version..."
         }
 
+        $remainingPeers = $null
         for ($round = 0; $round -lt 5; $round++) {
-            $missingPeers = Get-MissingRequiredPeers
-            if ($missingPeers.Count -eq 0) { break }
+            $remainingPeers = Get-MissingRequiredPeers
+            if ($remainingPeers.Count -eq 0) { break }
 
-            $peerSpecs = @($missingPeers.GetEnumerator() | Sort-Object Key | ForEach-Object {
+            $peerSpecs = @($remainingPeers.GetEnumerator() | Sort-Object Key | ForEach-Object {
                 $_.Key + '@' + $_.Value
             })
             Write-Output "Installing $($peerSpecs.Count) required DSH peer dependencies..."
             Invoke-NpmInstall -PackageSpecs $peerSpecs
+
+            # Installation invalidates the scan that selected these peers.
+            $remainingPeers = $null
         }
 
-        $remainingPeers = Get-MissingRequiredPeers
+        if ($null -eq $remainingPeers) {
+            $remainingPeers = Get-MissingRequiredPeers
+        }
         if ($remainingPeers.Count -gt 0) {
             throw "DSH runtime is missing $($remainingPeers.Count) required peer dependencies after preparation"
         }

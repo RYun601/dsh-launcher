@@ -8,6 +8,8 @@ $runtimeRoot = Join-Path $profileRoot 'dsh-launch\runtime'
 $fakeBin = Join-Path $testRoot 'fake-bin'
 $npmLog = Join-Path $testRoot 'npm.log'
 $nodeLog = Join-Path $testRoot 'node.log'
+$peerScanLog = Join-Path $testRoot 'peer-scan.log'
+$runtimeHarness = Join-Path $testRoot 'invoke-runtime-with-scan-log.ps1'
 $script:Passed = 0
 
 function Assert-Equal {
@@ -35,7 +37,8 @@ function Invoke-Test {
 function Invoke-Runtime {
     param(
         [string]$SelectedRuntimeRoot = $runtimeRoot,
-        [string]$PeerMode = ''
+        [string]$PeerMode = '',
+        [switch]$TrackPeerScans
     )
 
     $previousPath = $env:PATH
@@ -43,6 +46,7 @@ function Invoke-Runtime {
     $previousNodeLog = $env:DSH_TEST_NODE_LOG
     $previousUserProfile = $env:USERPROFILE
     $previousPeerMode = $env:DSH_TEST_PEER_MODE
+    $previousPeerScanLog = $env:DSH_TEST_PEER_SCAN_LOG
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $env:PATH = "$fakeBin;$previousPath"
@@ -50,9 +54,15 @@ function Invoke-Runtime {
         $env:DSH_TEST_NODE_LOG = $nodeLog
         $env:USERPROFILE = $profileRoot
         $env:DSH_TEST_PEER_MODE = $PeerMode
+        $env:DSH_TEST_PEER_SCAN_LOG = $peerScanLog
         $ErrorActionPreference = 'Continue'
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runtimeScript `
-            -Version '0.1.0-rc.8' -RuntimeRoot $SelectedRuntimeRoot -DshArguments 'web' 2>&1
+        $scriptPath = if ($TrackPeerScans) { $runtimeHarness } else { $runtimeScript }
+        $scriptArguments = if ($TrackPeerScans) {
+            @('-RuntimeScript', $runtimeScript, '-Version', '0.1.0-rc.8', '-RuntimeRoot', $SelectedRuntimeRoot, '-DshArguments', 'web')
+        } else {
+            @('-Version', '0.1.0-rc.8', '-RuntimeRoot', $SelectedRuntimeRoot, '-DshArguments', 'web')
+        }
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath @scriptArguments 2>&1
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output = [string]($output -join [Environment]::NewLine)
@@ -63,6 +73,7 @@ function Invoke-Runtime {
         $env:DSH_TEST_NODE_LOG = $previousNodeLog
         $env:USERPROFILE = $previousUserProfile
         $env:DSH_TEST_PEER_MODE = $previousPeerMode
+        $env:DSH_TEST_PEER_SCAN_LOG = $previousPeerScanLog
         $ErrorActionPreference = $previousErrorActionPreference
     }
 }
@@ -99,6 +110,24 @@ function Invoke-UnsafeRuntime {
 
 New-Item -ItemType Directory -Force -Path $testRoot, $fakeBin | Out-Null
 try {
+    $runtimeHarnessScript = @'
+param(
+    [Parameter(Mandatory = $true)][string]$RuntimeScript,
+    [Parameter(Mandatory = $true)][string]$Version,
+    [Parameter(Mandatory = $true)][string]$RuntimeRoot,
+    [string[]]$DshArguments = @('web')
+)
+
+function global:Get-ChildItem {
+    [IO.File]::AppendAllText($env:DSH_TEST_PEER_SCAN_LOG, "scan`r`n")
+    Microsoft.PowerShell.Management\Get-ChildItem @args
+}
+
+& $RuntimeScript -Version $Version -RuntimeRoot $RuntimeRoot -DshArguments $DshArguments
+exit $LASTEXITCODE
+'@
+    [IO.File]::WriteAllText($runtimeHarness, $runtimeHarnessScript, [Text.UTF8Encoding]::new($false))
+
     $fakeNpmScript = @'
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$NpmArguments)
 $ErrorActionPreference = 'Stop'
@@ -192,8 +221,10 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
     )
 
     Invoke-Test 'installs the DSH runtime, completes required peers, and reuses a ready version' {
-        $first = Invoke-Runtime
+        [IO.File]::WriteAllText($peerScanLog, '', [Text.Encoding]::ASCII)
+        $first = Invoke-Runtime -TrackPeerScans
         Assert-Equal 0 $first.ExitCode "Runtime preparation should succeed. Output:`n$($first.Output)"
+        Assert-Equal 2 @([IO.File]::ReadAllLines($peerScanLog)).Count 'One peer-install round should require two dependency scans'
         $npmCalls = [IO.File]::ReadAllText($npmLog)
         $nodeCalls = [IO.File]::ReadAllText($nodeLog)
         Assert-Match $npmCalls '(?m)^install .*--legacy-peer-deps .*@deepseek-ai/dsh@0\.1\.0-rc\.8' 'The primary runtime tree should use the proven npm resolution mode'
@@ -205,10 +236,13 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         Assert-Equal 'npm-ls-all' $ready.ValidatedBy 'The ready marker must identify the complete npm dependency audit'
 
         $callsBeforeReuse = @([IO.File]::ReadAllLines($npmLog)).Count
-        $second = Invoke-Runtime
+        $scansBeforeReuse = @([IO.File]::ReadAllLines($peerScanLog)).Count
+        $second = Invoke-Runtime -TrackPeerScans
         Assert-Equal 0 $second.ExitCode "A ready runtime should be reusable. Output:`n$($second.Output)"
         $callsAfterReuse = @([IO.File]::ReadAllLines($npmLog)).Count
         Assert-Equal $callsBeforeReuse $callsAfterReuse 'A ready immutable version should not run npm again'
+        $scansAfterReuse = @([IO.File]::ReadAllLines($peerScanLog)).Count
+        Assert-Equal $scansBeforeReuse $scansAfterReuse 'A ready immutable runtime must not scan package metadata again'
     }
 
     Invoke-Test 'repairs the known React 19 peer conflict before marking the runtime ready' {
