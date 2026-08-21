@@ -68,8 +68,9 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $otherWorkspace 'node_modules\example\sentinel.txt')) 'An unrelated npx workspace must remain intact'
 
         $outputText = [string]($output -join [Environment]::NewLine)
-        Assert-Match $outputText ([regex]::Escape($dshByMetadata)) 'The metadata-identified workspace should be reported'
-        Assert-Match $outputText ([regex]::Escape($dshByDependency)) 'The dependency-identified workspace should be reported'
+        $normalizedOutput = $outputText -replace '\s+', ''
+        Assert-Match $normalizedOutput ([regex]::Escape(($dshByMetadata -replace '\s+', ''))) 'The metadata-identified workspace should be reported'
+        Assert-Match $normalizedOutput ([regex]::Escape(($dshByDependency -replace '\s+', ''))) 'The dependency-identified workspace should be reported'
     }
 
     Invoke-Test 'explicit upgrade passes the registry-selected version to startup' {
