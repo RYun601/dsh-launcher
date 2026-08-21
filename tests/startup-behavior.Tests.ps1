@@ -74,13 +74,33 @@ function Read-TestLog {
     throw "Test log remained locked: $Path"
 }
 
+# The behavior test files are UTF-8 without BOM (Windows PowerShell 5.1 baseline).
+# Chinese phase text is therefore built from UTF-16 code units at runtime instead
+# of being written as literals, keeping the test files parseable by PS 5.1.
+function Get-PhaseText {
+    param([int[]]$CodeUnits)
+    return (-join @($CodeUnits | ForEach-Object { [char]$_ }))
+}
+
+$script:PhasePrefix = Get-PhaseText @(0x542F, 0x52A8, 0x9636, 0x6BB5, 0xFF1A)                       # 启动阶段：
+$script:HeartbeatPrefix = Get-PhaseText @(0x542F, 0x52A8, 0x4ECD, 0x5728, 0x8FDB, 0x884C, 0xFF1A)  # 启动仍在进行：
+$script:OldCounterText = Get-PhaseText @(0x4ECD, 0x5728, 0x542F, 0x52A8, 0xFF0C, 0x5DF2, 0x7B49, 0x5F85)  # 仍在启动，已等待
+$script:ElapsedPrefix = Get-PhaseText @(0xFF0C, 0x5DF2, 0x7B49, 0x5F85)                             # ，已等待
+$script:SecondsEllipsis = Get-PhaseText @(0x79D2, 0x2E, 0x2E, 0x2E)                                  # 秒...
+$script:PhaseDownload = Get-PhaseText @(0x6B63, 0x5728, 0x4E0B, 0x8F7D, 0x20, 0x44, 0x65, 0x65, 0x70, 0x53, 0x65, 0x65, 0x6B, 0x20, 0x48, 0x61, 0x72, 0x6E, 0x65, 0x73, 0x73, 0x20, 0x8FD0, 0x884C, 0x65F6, 0xFF0C, 0x9996, 0x6B21, 0x4E0B, 0x8F7D, 0x53EF, 0x80FD, 0x9700, 0x8981, 0x51E0, 0x5206, 0x949F, 0x2E, 0x2E, 0x2E)
+$script:PhasePeers = Get-PhaseText @(0x6B63, 0x5728, 0x5B89, 0x88C5, 0x20, 0x44, 0x53, 0x48, 0x20, 0x70, 0x65, 0x65, 0x72, 0x20, 0x4F9D, 0x8D56, 0xFF08, 0x32, 0x31, 0x20, 0x4E2A, 0xFF09, 0x2E, 0x2E, 0x2E)
+$script:PhaseValidate = Get-PhaseText @(0x6B63, 0x5728, 0x6821, 0x9A8C, 0x8FD0, 0x884C, 0x65F6, 0x4F9D, 0x8D56, 0x2E, 0x2E, 0x2E)
+$script:PhaseWeb = Get-PhaseText @(0x6B63, 0x5728, 0x542F, 0x52A8, 0x20, 0x57, 0x65, 0x62, 0x20, 0x670D, 0x52A1, 0x2E, 0x2E, 0x2E)
+
 function Invoke-StartScenario {
     param(
-        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate')]
+        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'Staged')]
         [string]$Scenario,
         [string]$ScenarioName = $Scenario,
         [ValidateRange(1, 65535)]
-        [int]$Port = 3080
+        [int]$Port = 3080,
+        [ValidateRange(1, 3600)]
+        [int]$HeartbeatSeconds = 30
     )
 
     $scenarioRoot = Join-Path $testRoot $ScenarioName
@@ -95,7 +115,8 @@ function Invoke-StartScenario {
         -ScriptPath $startScript `
         -ProfilePath $profilePath `
         -ProcessLogPath $processLogPath `
-        -Port $Port 2>&1
+        -Port $Port `
+        -HeartbeatSeconds $HeartbeatSeconds 2>&1
     $exitCode = $LASTEXITCODE
     $timer.Stop()
 
@@ -106,6 +127,7 @@ function Invoke-StartScenario {
         ProcessLog = [IO.File]::ReadAllText($processLogPath)
         LogPath    = Join-Path $profilePath 'dsh-launch\dsh-background.log'
         FailureOutputPath = Join-Path $profilePath 'dsh-launch\failure-output.txt'
+        StagedOutputPath = Join-Path $profilePath 'dsh-launch\staged-output.txt'
         StatePath  = Join-Path $profilePath 'dsh-launch\dsh-startup.json'
         LockPath   = Join-Path $profilePath 'dsh-launch\dsh-startup.lock'
         LockTokenPath = Join-Path $profilePath 'dsh-launch\dsh-startup.lock\token.txt'
@@ -225,6 +247,8 @@ function Invoke-ReservedRealBackgroundRunner {
         [string]$ScenarioName = 'reserved-real-runner',
         [int]$NodeDelaySeconds = 2,
         [switch]$NodeWritesStderr,
+        [switch]$NodeWritesStages,
+        [switch]$SkipMonitorInspection,
         [switch]$SuppressBrowserMonitor
     )
 
@@ -258,7 +282,7 @@ function Invoke-ReservedRealBackgroundRunner {
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
+        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
@@ -293,6 +317,9 @@ function Invoke-ReservedRealBackgroundRunner {
     if ($NodeWritesStderr) {
         $startInfo.EnvironmentVariables['DSH_TEST_NODE_STDERR'] = '1'
     }
+    if ($NodeWritesStages) {
+        $startInfo.EnvironmentVariables['DSH_TEST_NODE_STAGES'] = '1'
+    }
 
     $process = [Diagnostics.Process]::Start($startInfo)
     $transfer = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'dsh-launch-state.ps1') `
@@ -320,20 +347,33 @@ function Invoke-ReservedRealBackgroundRunner {
     Assert-True $runnerStarted 'The real background runner should record STARTING before the fake npx command exits'
     $stateOwnerDuringRun = [string]$state.Pid
     $lockOwnerDuringRun = (Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock\pid.txt') -Raw).Trim()
+    $startupMessages = [System.Collections.Generic.List[string]]::new()
+    if ($state.Message) { $startupMessages.Add([string]$state.Message) }
     $monitorCommandLine = ''
     $monitorPid = 0
-    for ($attempt = 0; $attempt -lt 20; $attempt++) {
-        $monitor = Get-CimInstance Win32_Process | Where-Object {
-            $_.CommandLine -match 'open-when-ready\.ps1' -and $_.CommandLine -match [regex]::Escape($launchRoot)
-        } | Select-Object -First 1
-        if ($monitor) {
-            $monitorCommandLine = [string]$monitor.CommandLine
-            $monitorPid = [int]$monitor.ProcessId
-            break
+    if (-not $SkipMonitorInspection) {
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $monitor = Get-CimInstance Win32_Process | Where-Object {
+                $_.CommandLine -match 'open-when-ready\.ps1' -and $_.CommandLine -match [regex]::Escape($launchRoot)
+            } | Select-Object -First 1
+            if ($monitor) {
+                $monitorCommandLine = [string]$monitor.CommandLine
+                $monitorPid = [int]$monitor.ProcessId
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+
+    while (-not $process.HasExited) {
+        if (Test-Path -LiteralPath $statePath) {
+            $currentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            if ($currentState.Message -and -not $startupMessages.Contains([string]$currentState.Message)) {
+                $startupMessages.Add([string]$currentState.Message)
+            }
         }
         Start-Sleep -Milliseconds 100
     }
-
     if (-not $process.WaitForExit(10000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw 'The real background runner did not exit after the fake DSH command completed'
@@ -352,6 +392,7 @@ function Invoke-ReservedRealBackgroundRunner {
         StateOwnerDuringRun = $stateOwnerDuringRun
         MonitorCommandLine = $monitorCommandLine
         RunnerPid = $process.Id
+        StartupMessages = @($startupMessages)
         LockPath  = Join-Path $launchRoot 'dsh-startup.lock'
         Log       = Read-TestLog -Path $logPath
         Output    = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
@@ -550,6 +591,22 @@ try {
         Assert-Equal $false (Test-Path -LiteralPath $result.LockPath) 'A completed runner must release its startup lock'
     }
 
+    Invoke-Test 'real runner reports runtime preparation phases through startup state' {
+        $result = Invoke-ReservedRealBackgroundRunner -ScenarioName 'runner-stages' `
+            -NodeDelaySeconds 2 -NodeWritesStages -SkipMonitorInspection -SuppressBrowserMonitor
+        $messages = [string]($result.StartupMessages -join [Environment]::NewLine)
+        Assert-Match $messages 'PREPARING_RUNTIME' `
+            'The runner should report the runtime preparation phase'
+        Assert-Match $messages 'INSTALLING_PEERS:21' `
+            'The runner should report the peer dependency phase'
+        Assert-Match $messages 'VALIDATING_RUNTIME' `
+            'The runner should report the dependency validation phase'
+        Assert-Match $messages 'STARTING_WEB' `
+            'The runner should report the web service phase'
+        Assert-Match $result.Log 'Preparing DeepSeek Harness runtime' `
+            'The runner log should retain the original preparation marker'
+    }
+
     Invoke-Test 'benign child stderr does not turn a successful DSH exit into runner failure' {
         $result = Invoke-ReservedRealBackgroundRunner -ScenarioName 'runner-benign-stderr' `
             -NodeDelaySeconds 0 -NodeWritesStderr -SuppressBrowserMonitor
@@ -638,6 +695,20 @@ try {
         Assert-Equal 1 $result.ExitCode 'Wait mode should fail when the background process exits'
         Assert-Match $result.Output ([regex]::Escape($result.LogPath)) 'Wait mode should print the full log path'
         Assert-Match $failureOutput ([regex]::Escape($utf8LogText)) 'Wait mode should decode UTF-8 log details without mojibake'
+    }
+
+    Invoke-Test 'wait mode prints mapped startup phases and a phase-aware heartbeat' {
+        $result = Invoke-StartScenario -Scenario Staged -ScenarioName 'staged-phases' -HeartbeatSeconds 1
+        Assert-Equal 0 $result.ExitCode "Staged startup should exit after HTTP readiness. Output:`n$($result.Output)"
+        Assert-Match $result.ProcessLog 'WEB_REQUEST' 'The wait loop must poll HTTP readiness before the staged service becomes ready'
+        $stagedOutput = [IO.File]::ReadAllText($result.StagedOutputPath)
+        foreach ($phase in @($script:PhaseDownload, $script:PhasePeers, $script:PhaseValidate, $script:PhaseWeb)) {
+            $phaseLinePattern = [regex]::Escape($script:PhasePrefix + $phase)
+            Assert-Equal 1 ([regex]::Matches($stagedOutput, $phaseLinePattern).Count) 'Each mapped phase line should appear exactly once'
+        }
+        Assert-NotMatch $stagedOutput ([regex]::Escape($script:OldCounterText)) 'The old five-second counter must no longer be printed'
+        $heartbeatPattern = [regex]::Escape($script:HeartbeatPrefix) + '.+' + [regex]::Escape($script:ElapsedPrefix) + ' \d+ ' + [regex]::Escape($script:SecondsEllipsis)
+        Assert-Match $stagedOutput $heartbeatPattern 'A heartbeat should carry the current phase and the elapsed seconds'
     }
 
     Invoke-Test 'a live startup lock prevents another background runner from being submitted' {

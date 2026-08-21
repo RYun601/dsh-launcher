@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate')]
+    [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'Staged')]
     [string]$Scenario,
 
     [Parameter(Mandatory = $true)]
@@ -13,7 +13,13 @@ param(
     [string]$ProcessLogPath,
 
     [ValidateRange(1, 65535)]
-    [int]$Port = 3080
+    [int]$Port = 3080,
+
+    [ValidateRange(1, 86400)]
+    [int]$TimeoutSeconds = 900,
+
+    [ValidateRange(1, 3600)]
+    [int]$HeartbeatSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +27,7 @@ $env:USERPROFILE = $ProfilePath
 $global:DshTestScenario = $Scenario
 $global:DshTestPortChecks = 0
 $global:DshTestProcessLogPath = $ProcessLogPath
+$global:DshTestWebRequestCount = 0
 
 $runtimeRoot = Join-Path $ProfilePath 'dsh-launch\runtime'
 $dshRoot = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh'
@@ -104,6 +111,29 @@ function global:Invoke-WebRequest {
         [Text.Encoding]::UTF8
     )
 
+    if ($global:DshTestScenario -eq 'Staged') {
+        $global:DshTestWebRequestCount++
+        $statePath = Join-Path $env:USERPROFILE 'dsh-launch\dsh-startup.json'
+        $stagedPhases = @('PREPARING_RUNTIME', 'INSTALLING_PEERS:21', 'VALIDATING_RUNTIME', 'STARTING_WEB')
+        if ($global:DshTestWebRequestCount -le $stagedPhases.Count) {
+            $stagedState = [ordered]@{
+                State   = 'STARTING'
+                Pid     = 4242
+                Version = '0.1.0-rc.8'
+                Message = $stagedPhases[$global:DshTestWebRequestCount - 1]
+            }
+            [IO.File]::WriteAllText(
+                $statePath,
+                ($stagedState | ConvertTo-Json),
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+        if ($global:DshTestWebRequestCount -lt ($stagedPhases.Count + 2)) {
+            throw 'HTTP endpoint is not ready'
+        }
+        return [pscustomobject]@{ StatusCode = 200 }
+    }
+
     if ($global:DshTestScenario -in @('Ready', 'DuplicateReady')) {
         return [pscustomobject]@{ StatusCode = 200 }
     }
@@ -116,6 +146,11 @@ function global:Start-Sleep {
         [int]$Seconds,
         [int]$Milliseconds
     )
+
+    if ($global:DshTestScenario -eq 'Staged') {
+        if ($Milliseconds) { [Threading.Thread]::Sleep($Milliseconds) }
+        elseif ($Seconds) { [Threading.Thread]::Sleep($Seconds * 1000) }
+    }
 }
 
 if ($Scenario -eq 'Failed') {
@@ -128,6 +163,12 @@ if ($Scenario -eq 'Failed') {
         [Text.UTF8Encoding]::new($false)
     )
     Start-Transcript -LiteralPath (Join-Path $logDirectory 'failure-output.txt') -Force | Out-Null
+}
+
+if ($Scenario -eq 'Staged') {
+    $logDirectory = Join-Path $ProfilePath 'dsh-launch'
+    New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
+    Start-Transcript -LiteralPath (Join-Path $logDirectory 'staged-output.txt') -Force | Out-Null
 }
 
 if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
@@ -156,9 +197,9 @@ if ($Scenario -eq 'DuplicateFailed') {
 
 try {
     if ($Scenario -in @('Immediate', 'Duplicate', 'OccupiedDuplicate')) {
-        & $ScriptPath -TimeoutSeconds 900 -Port $Port
+        & $ScriptPath -TimeoutSeconds $TimeoutSeconds -Port $Port
     } else {
-        & $ScriptPath -WaitForReady -TimeoutSeconds 900 -Port $Port
+        & $ScriptPath -WaitForReady -TimeoutSeconds $TimeoutSeconds -Port $Port -HeartbeatSeconds $HeartbeatSeconds
     }
 } finally {
     if ($listener) { $listener.Stop() }

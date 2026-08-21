@@ -226,6 +226,8 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         [IO.File]::WriteAllText($peerScanLog, '', [Text.Encoding]::ASCII)
         $first = Invoke-Runtime -TrackPeerScans
         Assert-Equal 0 $first.ExitCode "Runtime preparation should succeed. Output:`n$($first.Output)"
+        Assert-Match $first.Output 'Validating DSH runtime dependencies\.\.\.' 'Runtime preparation should announce dependency validation'
+        Assert-Match $first.Output 'Starting DeepSeek Harness web service\.\.\.' 'Runtime preparation should announce Web service startup'
         Assert-Equal 2 @([IO.File]::ReadAllLines($peerScanLog)).Count 'One peer-install round should require two dependency scans'
         $npmCalls = [IO.File]::ReadAllText($npmLog)
         $nodeCalls = [IO.File]::ReadAllText($nodeLog)

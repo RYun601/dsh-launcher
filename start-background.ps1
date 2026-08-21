@@ -4,7 +4,9 @@
     [int]$TimeoutSeconds = 900,
     [string]$Version,
     [ValidateRange(1, 65535)]
-    [int]$Port = 3080
+    [int]$Port = 3080,
+    [ValidateRange(1, 3600)]
+    [int]$HeartbeatSeconds = 30
 )
 
 $ErrorActionPreference = 'Stop'
@@ -79,15 +81,30 @@ function Get-DshStartupState {
     return $null
 }
 
+function ConvertTo-StartupPhaseDisplay {
+    param([Parameter(Mandatory = $true)][string]$Identifier)
+
+    if ($Identifier -eq 'PREPARING_RUNTIME') { return '正在下载 DeepSeek Harness 运行时，首次下载可能需要几分钟...' }
+    if ($Identifier -eq 'VALIDATING_EXISTING_RUNTIME') { return '正在验证本地 DeepSeek Harness 运行时...' }
+    if ($Identifier -match '^INSTALLING_PEERS:(\d+)$') { return "正在安装 DSH peer 依赖（$($Matches[1]) 个）..." }
+    if ($Identifier -eq 'REPAIRING_REACT_PEERS') { return '正在修复 React 兼容性依赖...' }
+    if ($Identifier -eq 'VALIDATING_RUNTIME') { return '正在校验运行时依赖...' }
+    if ($Identifier -eq 'STARTING_WEB') { return '正在启动 Web 服务...' }
+    return ''
+}
+
 function Wait-DshStartup {
     param(
         [Parameter(Mandatory = $true)][int]$OwnerPid,
-        [object]$SubmittedProcess
+        [object]$SubmittedProcess,
+        [ValidateRange(1, 3600)]
+        [int]$HeartbeatSeconds = 30
     )
 
     $startedAt = Get-Date
     $deadline = $startedAt.AddSeconds($TimeoutSeconds)
-    $nextProgressSeconds = 5
+    $nextHeartbeatSeconds = $HeartbeatSeconds
+    $lastDisplayedPhase = ''
     while ((Get-Date) -lt $deadline) {
         if (Test-DshReady) {
             Write-Host "DeepSeek Harness 服务已就绪（PID $OwnerPid）"
@@ -115,9 +132,20 @@ function Wait-DshStartup {
         }
 
         $elapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
-        if ($elapsedSeconds -ge $nextProgressSeconds) {
-            Write-Host "仍在启动，已等待 $elapsedSeconds 秒..."
-            $nextProgressSeconds += 5
+
+        $currentPhase = ''
+        if ($startupState -and $startupState.Message) {
+            $currentPhase = ConvertTo-StartupPhaseDisplay -Identifier ([string]$startupState.Message)
+        }
+        if ($currentPhase -and $currentPhase -ne $lastDisplayedPhase) {
+            Write-Host "启动阶段：$currentPhase"
+            $lastDisplayedPhase = $currentPhase
+        }
+
+        if ($elapsedSeconds -ge $nextHeartbeatSeconds) {
+            $heartbeatPhase = if ($lastDisplayedPhase) { $lastDisplayedPhase } else { '正在等待服务就绪' }
+            Write-Host "启动仍在进行：$heartbeatPhase，已等待 $elapsedSeconds 秒..."
+            $nextHeartbeatSeconds += $HeartbeatSeconds
         }
         Start-Sleep -Seconds 1
     }
@@ -141,7 +169,7 @@ if ($lockText -match '^LOCKED\s+(\d+)') {
     Write-Host "查看日志：deepseek --logs"
     if (-not $WaitForReady) { exit 0 }
     Write-Host '正在等待现有启动任务完成...'
-    exit (Wait-DshStartup -OwnerPid $existingOwnerPid)
+    exit (Wait-DshStartup -OwnerPid $existingOwnerPid -HeartbeatSeconds $HeartbeatSeconds)
 }
 
 # 0) 端口预检：只有在确认没有正在进行的 launcher startup 后，才允许
@@ -254,4 +282,4 @@ if (-not $WaitForReady) {
 # 4) 快捷方式/升级模式：等待 HTTP 真正可用；runner monitor 负责打开浏览器
 Write-Host "DeepSeek Harness 正在后台启动（PID $($proc.Id)）"
 Write-Host '正在等待服务就绪；首次下载可能需要几分钟...'
-exit (Wait-DshStartup -OwnerPid $proc.Id -SubmittedProcess $proc)
+exit (Wait-DshStartup -OwnerPid $proc.Id -SubmittedProcess $proc -HeartbeatSeconds $HeartbeatSeconds)
