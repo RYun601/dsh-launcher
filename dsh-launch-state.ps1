@@ -267,7 +267,7 @@ switch ($Action) {
             if (Test-DshNpxWorkspace -Path $_.FullName) {
                 $workspace = $_.FullName
                 Remove-Item -LiteralPath $workspace -Recurse -Force
-                Write-Output $workspace
+                [Console]::Out.WriteLine($workspace)
             }
         }
     }
