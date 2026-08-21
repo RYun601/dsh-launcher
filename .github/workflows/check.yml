@@ -16,7 +16,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','set-shortcut.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
+          $files = @(Get-Content release-files.txt | Where-Object { $_ -like '*.ps1' })
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
@@ -42,7 +42,7 @@ jobs:
         run: |
           grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
           grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
-          grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
+          grep -q 'New-Item -ItemType Directory' background-run.ps1 || { echo "::error::background-run.ps1 missing log dir creation"; exit 1; }
           grep -q -- '--upgrade' deepseek.cmd || { echo "::error::deepseek.cmd missing --upgrade"; exit 1; }
           grep -q -- '--logs' deepseek.cmd || { echo "::error::deepseek.cmd missing --logs"; exit 1; }
           grep -q -- '--version' deepseek.cmd || { echo "::error::deepseek.cmd missing --version"; exit 1; }
@@ -94,8 +94,13 @@ jobs:
           if ($out -notmatch 'CHECK=.*dsh-launcher') { throw "plain iex FAILED: $out" }
           Write-Host 'plain iex OK'
 
-      - name: Run startup behavior regression tests
+      - name: Run complete Windows behavior suite
         shell: pwsh
         run: |
-          & ./tests/startup-behavior.Tests.ps1
-          & ./tests/shortcut-behavior.Tests.ps1
+          $ErrorActionPreference = 'Stop'
+          $tests = @(Get-ChildItem ./tests -Filter '*.Tests.ps1' | Sort-Object Name)
+          foreach ($test in $tests) {
+            Write-Host "Running $($test.Name)..."
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test.FullName
+            if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed with exit code $LASTEXITCODE" }
+          }

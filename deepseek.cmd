@@ -76,11 +76,13 @@ echo Press Ctrl+C or close this window to stop.
 echo.
 for /f %%P in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId"') do set "DSH_PPID=%%P"
 if defined DSH_PPID (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -ParentPid %DSH_PPID%
+    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -ParentPid %DSH_PPID% -PollIntervalMilliseconds 200
 ) else (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1"
+    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -PollIntervalMilliseconds 200
 )
-npx --yes @deepseek-ai/dsh web
+for /f "delims=" %%v in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0resolve-dsh-version.ps1" -PreferLocalRuntime') do set "DSH_TARGET=%%v"
+if not defined DSH_TARGET set "DSH_TARGET=latest"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-dsh.ps1" -Version "%DSH_TARGET%" -DshArguments web -NoOpen
 echo.
 echo Service stopped (or failed to start).
 exit /b 0
@@ -98,8 +100,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-dsh.ps1"
 exit /b 0
 
 :status
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue; if ($c) { try { $r=Invoke-WebRequest 'http://127.0.0.1:3080' -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop; Write-Host ('RUNNING (ready) - PID ' + $c.OwningProcess) } catch { Write-Host ('RUNNING (starting) - PID ' + $c.OwningProcess) } } else { Write-Host 'NOT RUNNING' }"
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-launch-state.ps1" -Action GetStatus
+exit /b %ERRORLEVEL%
 
 :logs
 for /f "tokens=2" %%n in ("%ARGS%") do set "LOGN=%%n"
@@ -111,14 +113,14 @@ exit /b 0
 :upgrade
 echo Upgrading DeepSeek Harness (stop -> clear cache -> restart)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1"
-exit /b 0
+exit /b %ERRORLEVEL%
 
 :update
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-check.ps1"
 exit /b 0
 
 :version
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ver = if (Test-Path '%~dp0VERSION') { (Get-Content '%~dp0VERSION' -Raw).Trim() } else { 'unknown' }; $local = 'unknown'; Get-ChildItem (Join-Path $env:LOCALAPPDATA 'npm-cache\_npx') -Directory -ErrorAction SilentlyContinue | ForEach-Object { $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $pj) { try { $local = (Get-Content $pj -Raw | ConvertFrom-Json).version } catch {} } }; Write-Host ('dsh-launcher ' + $ver); Write-Host ('DeepSeek Harness ' + $local)"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ". '%~dp0dsh-version.ps1'; $ver = if (Test-Path '%~dp0VERSION') { (Get-Content '%~dp0VERSION' -Raw).Trim() } else { 'unknown' }; $vers = @(); $cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'; if (Test-Path $cacheRoot) { Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $pj) { try { $vers += (Get-Content $pj -Raw | ConvertFrom-Json).version } catch {} } } }; $runtimePj = Join-Path $env:USERPROFILE 'dsh-launch\runtime\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $runtimePj) { try { $vers += (Get-Content $runtimePj -Raw | ConvertFrom-Json).version } catch {} }; $gpj = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $gpj) { try { $vers += (Get-Content $gpj -Raw | ConvertFrom-Json).version } catch {} }; $local = if ($vers.Count) { Get-HighestDshVersion $vers } else { 'unknown' }; Write-Host ('dsh-launcher ' + $ver); Write-Host ('DeepSeek Harness ' + $local)"
 exit /b 0
 
 :uninstall
@@ -152,6 +154,6 @@ goto :eof
 :check
 echo deepseek.cmd: OK
 echo Script dir: %~dp0
-where npx >nul 2>&1 && echo npx: found || echo npx: NOT FOUND
+where npm >nul 2>&1 && echo npm: found || echo npm: NOT FOUND
 echo GUI address: http://127.0.0.1:3080
 exit /b 0

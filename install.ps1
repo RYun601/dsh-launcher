@@ -41,13 +41,13 @@ if (-not $nodeVer) {
     exit 1
 }
 Write-Host "Node.js $nodeVer"
-$npxVer = $null
-try { $npxVer = & npx --version 2>$null } catch { }
-if (-not $npxVer) {
-    Write-Host '未检测到 npx！请重新安装 Node.js（通常自带 npx）：https://nodejs.org'
+$npmVer = $null
+try { $npmVer = & npm --version 2>$null } catch { }
+if (-not $npmVer) {
+    Write-Host '未检测到 npm！请重新安装 Node.js（通常自带 npm）：https://nodejs.org'
     exit 1
 }
-Write-Host "npx $npxVer"
+Write-Host "npm $npmVer"
 
 $api = 'https://api.github.com/repos/RYun601/dsh-launcher/releases/latest'
 Write-Host '正在获取最新版本信息...'
