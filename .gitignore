@@ -2,3 +2,5 @@ dsh-background.log
 dsh-background.log.err
 dsh-background.log.old
 .worktrees/
+dist/
+Microsoft/

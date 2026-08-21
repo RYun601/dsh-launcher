@@ -253,8 +253,7 @@ $runArguments = @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass',
     '-File', (Join-Path $PSScriptRoot 'run-dsh.ps1'),
     '-Version', $Version,
-    '-DshArguments', 'web',
-    '-NoOpen'
+    '-DshArguments', 'web'
 )
 & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" @runArguments *>> $log
 $dshExitCode = $LASTEXITCODE
@@ -444,7 +443,8 @@ Call `Get-NetTCPConnection` only after `Test-TcpPortOpen` returns true. Preserve
 
 - [ ] **Step 8: Update all launcher-controlled Web invocations**
 
-Pass `-NoOpen` from `background-run.ps1`, `deepseek.cmd`, and
+Add `-NoOpen` to the `background-run.ps1` child arguments introduced in Task
+2, and pass it from `deepseek.cmd` and
 `start-deepseek-harness.bat`. Use
 `resolve-dsh-version.ps1 -PreferLocalRuntime` for both foreground entrypoints.
 Pass `-PollIntervalMilliseconds 200` explicitly from runner/foreground monitor

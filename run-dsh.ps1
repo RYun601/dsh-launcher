@@ -4,7 +4,9 @@ param(
 
     [string]$RuntimeRoot,
 
-    [string[]]$DshArguments = @('web')
+    [string[]]$DshArguments = @('web'),
+
+    [switch]$NoOpen
 )
 
 $ErrorActionPreference = 'Stop'
@@ -240,6 +242,9 @@ try {
         Move-Item -LiteralPath $temporaryMarker -Destination $readyMarker -Force
     }
 
+    if ($NoOpen -and $DshArguments -notcontains '--no-open') {
+        $DshArguments = @($DshArguments) + '--no-open'
+    }
     & node $dshEntrypoint @DshArguments
     $nodeExitCode = $LASTEXITCODE
 } finally {

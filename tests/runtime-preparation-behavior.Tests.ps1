@@ -38,7 +38,8 @@ function Invoke-Runtime {
     param(
         [string]$SelectedRuntimeRoot = $runtimeRoot,
         [string]$PeerMode = '',
-        [switch]$TrackPeerScans
+        [switch]$TrackPeerScans,
+        [switch]$NoOpen
     )
 
     $previousPath = $env:PATH
@@ -62,6 +63,7 @@ function Invoke-Runtime {
         } else {
             @('-Version', '0.1.0-rc.8', '-RuntimeRoot', $SelectedRuntimeRoot, '-DshArguments', 'web')
         }
+        if ($NoOpen) { $scriptArguments += '-NoOpen' }
         $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath @scriptArguments 2>&1
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
@@ -243,6 +245,17 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         Assert-Equal $callsBeforeReuse $callsAfterReuse 'A ready immutable version should not run npm again'
         $scansAfterReuse = @([IO.File]::ReadAllLines($peerScanLog)).Count
         Assert-Equal $scansBeforeReuse $scansAfterReuse 'A ready immutable runtime must not scan package metadata again'
+    }
+
+    Invoke-Test 'NoOpen appends the DSH browser flag exactly once' {
+        [IO.File]::WriteAllText($nodeLog, '', [Text.Encoding]::ASCII)
+
+        $result = Invoke-Runtime -NoOpen
+
+        Assert-Equal 0 $result.ExitCode "NoOpen runtime should succeed. Output:`n$($result.Output)"
+        $nodeCall = [IO.File]::ReadAllText($nodeLog)
+        Assert-Match $nodeCall '@deepseek-ai\\dsh\\lib\\bin\.js web --no-open' 'DSH must receive --no-open'
+        Assert-Equal 1 ([regex]::Matches($nodeCall, '--no-open').Count) 'DSH must receive --no-open exactly once'
     }
 
     Invoke-Test 'repairs the known React 19 peer conflict before marking the runtime ready' {

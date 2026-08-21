@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   package:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +19,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $files = @('install.ps1','uninstall.ps1','stop-dsh.ps1','start-background.ps1','set-shortcut.ps1','update-check.ps1','open-when-ready.ps1','upgrade-dsh.ps1')
+          $files = @(Get-Content release-files.txt | Where-Object { $_ -like '*.ps1' })
           foreach ($f in $files) {
             $tokens = $null; $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $f), [ref]$tokens, [ref]$errors) | Out-Null
@@ -40,12 +40,22 @@ jobs:
           fi
           echo "install.ps1 has no BOM, OK"
 
+      - name: Validate tag matches VERSION
+        shell: pwsh
+        run: |
+          $version = (Get-Content VERSION -Raw).Trim()
+          $expectedTag = "v$version"
+          if ("${{ github.ref_name }}" -ne $expectedTag) {
+            throw "Release tag '${{ github.ref_name }}' does not match VERSION '$version' (expected '$expectedTag')"
+          }
+          Write-Host "Release tag matches VERSION: $expectedTag"
+
       - name: Validate cmd flags and log dir logic
         shell: bash
         run: |
           grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
           grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
-          grep -q 'mkdir' background-run.cmd || { echo "::error::background-run.cmd missing log dir creation"; exit 1; }
+          grep -q 'New-Item -ItemType Directory' background-run.ps1 || { echo "::error::background-run.ps1 missing log dir creation"; exit 1; }
           grep -q -- '-WaitForReady -TimeoutSeconds 900' start-background.cmd || { echo "::error::start-background.cmd missing interactive wait mode"; exit 1; }
           grep -q -- 'set-shortcut.ps1' install.ps1 || { echo "::error::install.ps1 missing shortcut migration helper"; exit 1; }
           # 回归防护（P0 教训）：upgrade-dsh.ps1 的缓存清理路径必须指向真实目录
@@ -55,16 +65,34 @@ jobs:
           grep -q 'BADARG' deepseek.cmd || { echo "::error::deepseek.cmd missing unknown-argument validation"; exit 1; }
           echo "cmd files OK"
 
-      - name: Prepare package
+      - name: Run complete Windows behavior suite
+        shell: pwsh
         run: |
-          mkdir -p dist/dsh-launcher
-          cp deepseek.cmd install-command.cmd start-deepseek-harness.bat \
-             start-background.cmd start-background.ps1 stop-dsh.cmd stop-dsh.ps1 \
-             open-when-ready.ps1 background-run.cmd install.ps1 set-shortcut.ps1 update-check.ps1 uninstall.ps1 upgrade-dsh.ps1 \
-             deepseek.ico README.md README.en.md VERSION dist/dsh-launcher/
-          # Windows 批处理文件必须使用 CRLF 行尾
-          sed -i 's/$/\r/' dist/dsh-launcher/*.cmd dist/dsh-launcher/*.bat
-          cd dist && zip -r dsh-launcher.zip dsh-launcher
+          $ErrorActionPreference = 'Stop'
+          $tests = @(Get-ChildItem ./tests -Filter '*.Tests.ps1' | Sort-Object Name)
+          foreach ($test in $tests) {
+            Write-Host "Running $($test.Name)..."
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test.FullName
+            if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed with exit code $LASTEXITCODE" }
+          }
+
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageRoot = Join-Path $PWD 'dist/dsh-launcher'
+          New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+          foreach ($file in @(Get-Content release-files.txt | Where-Object { $_ -and -not $_.StartsWith('#') })) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Release source missing: $file" }
+            Copy-Item -LiteralPath $file -Destination $packageRoot
+          }
+          Compress-Archive -LiteralPath $packageRoot -DestinationPath (Join-Path $PWD 'dist/dsh-launcher.zip') -CompressionLevel Optimal
+
+      - name: Smoke test extracted release archive
+        shell: pwsh
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tests/release-package-behavior.Tests.ps1 -ArchivePath ./dist/dsh-launcher.zip
+          if ($LASTEXITCODE -ne 0) { throw "Extracted release smoke test failed with exit code $LASTEXITCODE" }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2

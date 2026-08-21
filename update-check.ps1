@@ -12,33 +12,48 @@ try {
         $OutputEncoding = $__dsh_enc
     }
 } catch { }
-$local = $null
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $scriptDir 'dsh-version.ps1')
+
+# 本地版本：launcher 运行时 + 旧 npx 缓存 + npm 全局安装都扫描，取最高
+$versions = @()
+$runtimePj = Join-Path $env:USERPROFILE 'dsh-launch\runtime\node_modules\@deepseek-ai\dsh\package.json'
+if (Test-Path $runtimePj) {
+    try {
+        $j = Get-Content $runtimePj -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($j.name -eq '@deepseek-ai/dsh' -and $j.version) { $versions += $j.version }
+    } catch { }
+}
 $cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'
 if (Test-Path $cacheRoot) {
-    # 定向扫描：只查 _npx\<hash>\node_modules\@deepseek-ai\dsh\package.json，避免全量递归
     Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'
         if (Test-Path $pj) {
             try {
                 $j = Get-Content $pj -Raw | ConvertFrom-Json
-                if ($j.name -eq '@deepseek-ai/dsh' -and $j.version) { $local = $j.version }
+                if ($j.name -eq '@deepseek-ai/dsh' -and $j.version) { $versions += $j.version }
             } catch { }
         }
     }
 }
-if (-not $local) { $local = 'unknown' }
+$globalPj = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'
+if (Test-Path $globalPj) {
+    try {
+        $j = Get-Content $globalPj -Raw | ConvertFrom-Json
+        if ($j.name -eq '@deepseek-ai/dsh' -and $j.version) { $versions += $j.version }
+    } catch { }
+}
+$local = if ($versions.Count) { Get-HighestDshVersion $versions } else { 'unknown' }
 Write-Host "本地版本：$local"
-try {
-    $latest = npm view @deepseek-ai/dsh version 2>$null | Select-Object -First 1
-} catch { $latest = $null }
+
+# 最新版本 = 各 dist-tag（latest/next/...）中的最高者
+$latest = & (Join-Path $scriptDir 'resolve-dsh-version.ps1')
 if ($latest) {
     Write-Host "最新版本：$latest"
-    if ($local -ne 'unknown' -and $local -ne $latest) {
+    if ($local -ne 'unknown' -and (Compare-DshVersion $local $latest) -lt 0) {
         Write-Host ""
-        Write-Host "有新版本可用！执行 deepseek --upgrade 一键升级，或手动操作："
-        Write-Host "  1. 停止服务：deepseek --stop"
-        Write-Host "  2. 删除 npx 缓存目录：$cacheRoot"
-        Write-Host "  3. 重新运行 deepseek -b（会自动下载最新版）"
+        Write-Host "有新版本可用！执行 deepseek --upgrade 一键升级。"
     } else {
         Write-Host "已是最新版本。"
     }

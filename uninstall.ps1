@@ -28,7 +28,7 @@ if ($Full) {
     Write-Host ''
     Write-Host '即将执行完整卸载：'
     Write-Host '  1. 删除桌面快捷方式：DeepSeek Harness.lnk'
-    Write-Host "  2. 删除日志目录：$env:USERPROFILE\dsh-launch"
+    Write-Host "  2. 删除日志、运行时和启动状态：$env:USERPROFILE\dsh-launch"
     Write-Host "  3. 删除安装目录：$dir"
     $ans = Read-Host '确认删除以上内容？输入 y 继续，其他任意键取消'
     if ($ans -eq 'y' -or $ans -eq 'Y') {
@@ -36,7 +36,11 @@ if ($Full) {
         $lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
         if (Test-Path $lnkPath) { Remove-Item $lnkPath -Force; Write-Host "已删除快捷方式：$lnkPath" }
         $logDir = Join-Path $env:USERPROFILE 'dsh-launch'
-        if (Test-Path $logDir) { Remove-Item $logDir -Recurse -Force; Write-Host "已删除日志目录：$logDir" }
+        if (Test-Path $logDir) {
+            # The directory contains logs, the managed runtime, and launcher-owned startup state.
+            Remove-Item $logDir -Recurse -Force
+            Write-Host "已删除日志、运行时和启动状态目录：$logDir"
+        }
         if (Test-Path $dir) {
             Remove-Item $dir -Recurse -Force
             Write-Host "已删除安装目录：$dir"
