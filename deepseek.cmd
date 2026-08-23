@@ -4,6 +4,12 @@ cd /d "%USERPROFILE%"
 
 set "ARGS=%*"
 
+rem The cmd built-in help switch (slash followed by a question mark) is not a
+rem plain token for echo or for: echo prints ECHO help and for drops the
+rem token, so that help alias would silently fall through to the foreground
+rem launch.  Fold it into --help before validation and dispatch.
+set "ARGS=%ARGS:/?=--help%"
+
 rem Validate every token before dispatching.  The findstr checks below use
 rem substring matching, so unknown options could otherwise trigger a mode
 rem accidentally.  Numeric tokens are accepted only for --logs [N]; --full
@@ -105,7 +111,10 @@ exit /b %ERRORLEVEL%
 
 :logs
 for /f "tokens=2" %%n in ("%ARGS%") do set "LOGN=%%n"
-echo %LOGN% | findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
+rem echo( + no space before the pipe keeps the echoed message free of the
+rem trailing space that echo would otherwise append; an anchored digit regex
+rem must not see that trailing space or `--logs N` always falls back to 20.
+echo(%LOGN%| findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
 if not errorlevel 1 (set "COUNT=%LOGN%") else (set "COUNT=20")
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'; if (Test-Path $log) { Get-Content $log -Tail %COUNT% -Encoding UTF8 } else { Write-Host ('No log yet: ' + $log) }"
 exit /b 0
