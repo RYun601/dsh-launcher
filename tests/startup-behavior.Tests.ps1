@@ -46,11 +46,15 @@ function Invoke-Test {
 function Remove-TestRoot {
     param([string]$Path)
 
-    for ($attempt = 0; $attempt -lt 30 -and (Test-Path -LiteralPath $Path); $attempt++) {
+    # Retry long enough for a just-exited child process or an antivirus scan
+    # to release its handle, and treat every failure as transient rather than
+    # only IO.IOException: an occasionally held handle must not fail the suite
+    # (observed as a flaky release.yml failure on a clean Windows runner).
+    for ($attempt = 0; $attempt -lt 60 -and (Test-Path -LiteralPath $Path); $attempt++) {
         try {
             Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
-        } catch [IO.IOException] {
-            Start-Sleep -Milliseconds 100
+        } catch {
+            Start-Sleep -Milliseconds 250
         }
     }
     if (Test-Path -LiteralPath $Path) {
