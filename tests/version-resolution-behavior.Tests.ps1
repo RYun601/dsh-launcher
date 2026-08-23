@@ -79,15 +79,23 @@ function New-TestRuntime {
 }
 
 function Invoke-Resolver {
-    param([switch]$PreferLocalRuntime)
+    param(
+        [switch]$PreferLocalRuntime,
+        # Registry the resolver's direct HTTP fast path should query. The
+        # default points at an unreachable loopback port so tests never touch
+        # the real registry and the resolver falls back to the fake npm.
+        [string]$Registry = 'http://127.0.0.1:9'
+    )
 
     $previousPath = $env:PATH
     $previousProfile = $env:USERPROFILE
     $previousLog = $env:DSH_TEST_NPM_LOG
+    $previousRegistry = $env:DSH_REGISTRY
     try {
         $env:PATH = "$fakeBin;$previousPath"
         $env:USERPROFILE = $profileRoot
         $env:DSH_TEST_NPM_LOG = $npmLog
+        $env:DSH_REGISTRY = $Registry
         $arguments = @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass',
             '-File', $resolver,
@@ -103,6 +111,7 @@ function Invoke-Resolver {
         $env:PATH = $previousPath
         $env:USERPROFILE = $previousProfile
         $env:DSH_TEST_NPM_LOG = $previousLog
+        $env:DSH_REGISTRY = $previousRegistry
     }
 }
 
@@ -172,6 +181,60 @@ try {
         Assert-Equal 0 $result.ExitCode "Registry resolution should succeed. Output:`n$($result.Output)"
         Assert-Equal '0.1.0-rc.10' $result.Output.Trim() 'Explicit release discovery must use npm'
         Assert-Match (Read-NpmLog) '^view @deepseek-ai/dsh dist-tags --json$' 'Registry mode must query dist-tags'
+    }
+
+    Invoke-Test 'direct registry query returns the highest dist-tag without invoking npm' {
+        Reset-TestRuntime
+        Reset-NpmLog
+        # Serve dist-tags from a throwaway loopback endpoint so the resolver's
+        # HTTP fast path is exercised without touching the real registry. The
+        # listener lives in a background job and signals readiness through a
+        # marker file; it speaks a minimal HTTP/1.1 response itself.
+        $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $probe.Start()
+        $port = ([Net.IPEndPoint]$probe.LocalEndpoint).Port
+        $probe.Stop()
+        $baseUrl = "http://127.0.0.1:$port"
+        $markerPath = Join-Path $testRoot ('http-ready-' + [guid]::NewGuid().ToString('N') + '.txt')
+
+        $listenerJob = Start-Job -ScriptBlock {
+            param($TargetPort, $Marker)
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $TargetPort)
+            $listener.Start()
+            [IO.File]::WriteAllText($Marker, 'ready', [Text.Encoding]::ASCII)
+            $client = $listener.AcceptTcpClient()
+            $stream = $client.GetStream()
+            $buffer = New-Object byte[] 8192
+            $null = $stream.Read($buffer, 0, $buffer.Length)
+            $body = '{"latest":"0.1.0-rc.9","next":"0.1.0-rc.10"}'
+            $payload = [Text.Encoding]::UTF8.GetBytes($body)
+            $head = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($payload.Length)`r`nConnection: close`r`n`r`n"
+            $headBytes = [Text.Encoding]::ASCII.GetBytes($head)
+            $stream.Write($headBytes, 0, $headBytes.Length)
+            $stream.Write($payload, 0, $payload.Length)
+            $stream.Flush()
+            $client.Close()
+            $listener.Stop()
+        } -ArgumentList @($port, $markerPath)
+
+        try {
+            $readyDeadline = (Get-Date).AddSeconds(10)
+            while (-not (Test-Path -LiteralPath $markerPath) -and (Get-Date) -lt $readyDeadline) {
+                Start-Sleep -Milliseconds 50
+            }
+            if (-not (Test-Path -LiteralPath $markerPath)) {
+                throw 'Test HTTP endpoint did not become ready'
+            }
+
+            $result = Invoke-Resolver -Registry $baseUrl
+
+            Assert-Equal 0 $result.ExitCode "HTTP resolution should succeed. Output:`n$($result.Output)"
+            Assert-Equal '0.1.0-rc.10' $result.Output.Trim() 'The highest dist-tag must be selected'
+            Assert-Equal '' (Read-NpmLog) 'A reachable registry fast path must not invoke npm'
+        } finally {
+            Stop-Job -Job $listenerJob -ErrorAction SilentlyContinue
+            Remove-Job -Job $listenerJob -Force -ErrorAction SilentlyContinue
+        }
     }
 
     Write-Host "All $script:Passed version resolution behavior tests passed."
