@@ -109,13 +109,15 @@ After completing the installation above (any option) and opening a **new** termi
 | `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
 | `deepseek --version` | Show launcher version and local DeepSeek Harness version |
 | `deepseek --update` | Compare the local version with the latest on npm and show how to update |
-| `deepseek --upgrade` | One-click upgrade: stop service, clear old DSH npx workspaces, prepare the latest runtime, restart in background |
+| `deepseek --upgrade` | One-click upgrade: stop service, clear old DSH npx workspaces, sync the global `dsh` command, prepare the latest runtime, restart in background |
 | `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
 | `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation) |
 | `deepseek --check` | Environment self-check (script path / npm / port) |
 | `deepseek --help` | Show help |
 
 - Normal startup prefers the prepared and validated local DSH version and does not contact npm when a usable runtime exists. Dependencies are prepared only for a first launch or repair without a usable runtime. Use `deepseek --update` to discover releases from npm and `deepseek --upgrade` to install and switch versions.
+- `deepseek --update` / `deepseek --upgrade` query the npm public registry's dist-tags directly (faster than `npm view`). To use a mirror or a private registry, set the `DSH_REGISTRY` environment variable (e.g. `https://registry.npmmirror.com`). It only affects remote release discovery, never local runtime startup.
+- `deepseek --upgrade` also syncs the global `dsh` command: upgrades it to the latest version when installed, or installs it when missing, so the `dsh` command stays in line with the launcher. A failure here only prints a warning and never blocks the launcher runtime upgrade.
 
 ## Other Ways to Start
 

@@ -68,9 +68,26 @@ if ($PreferLocalRuntime) {
 }
 
 $publishedVersions = @()
-try {
-    $tags = npm view @deepseek-ai/dsh dist-tags --json 2>$null | ConvertFrom-Json
-} catch { $tags = $null }
+# Fast path: query the registry's dist-tags endpoint directly so update and
+# upgrade checks skip the ~2s `npm` CLI startup that `npm view` pays on every
+# invocation. The registry defaults to the npm public registry; DSH_REGISTRY
+# can point at a mirror (e.g. a local proxy). `npm view` remains the fallback
+# so custom npm registry config, proxies, and auth keep working.
+$registry = if ($env:DSH_REGISTRY) { [string]$env:DSH_REGISTRY } else { 'https://registry.npmjs.org' }
+$registry = $registry.TrimEnd('/')
+$tags = $null
+if ($registry) {
+    try {
+        $tags = Invoke-RestMethod -Uri "$registry/-/package/@deepseek-ai%2Fdsh/dist-tags" -TimeoutSec 8 -ErrorAction Stop
+    } catch {
+        $tags = $null
+    }
+}
+if (-not $tags) {
+    try {
+        $tags = npm view @deepseek-ai/dsh dist-tags --json 2>$null | ConvertFrom-Json
+    } catch { $tags = $null }
+}
 if ($tags) {
     foreach ($prop in $tags.PSObject.Properties) {
         $publishedVersions += [string]$prop.Value

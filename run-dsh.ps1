@@ -220,6 +220,7 @@ try {
             throw "DSH entrypoint was not installed: $dshEntrypoint"
         }
 
+        Write-Output 'Validating DSH runtime dependencies...'
         $audit = Invoke-NpmDependencyAudit
         if ($audit.ExitCode -ne 0 -and (Repair-KnownPeerConflict -Audit $audit)) {
             $audit = Invoke-NpmDependencyAudit
@@ -245,6 +246,7 @@ try {
     if ($NoOpen -and $DshArguments -notcontains '--no-open') {
         $DshArguments = @($DshArguments) + '--no-open'
     }
+    Write-Output 'Starting DeepSeek Harness web service...'
     & node $dshEntrypoint @DshArguments
     $nodeExitCode = $LASTEXITCODE
 } finally {

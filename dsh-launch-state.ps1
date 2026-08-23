@@ -88,7 +88,17 @@ function Test-StartupOwnerAlive {
     if ($ProcessId -le 0) {
         return $false
     }
-    return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) {
+        return $false
+    }
+    # The startup lock is always owned by a PowerShell coordinator/runner
+    # process (start-background.ps1 reserves it, background-run.ps1 owns it).
+    # A stale lock whose PID was later reused by an unrelated process (a
+    # browser, a service, any app) must not block future launches, so the
+    # owner must still look like a launcher PowerShell process.
+    $processName = [string]$process.ProcessName
+    return $processName -eq 'powershell' -or $processName -eq 'pwsh'
 }
 
 function Get-StartupLockInfo {

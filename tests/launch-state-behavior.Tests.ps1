@@ -91,6 +91,29 @@ try {
         Assert-True (-not (Test-Path -LiteralPath $staleLock)) 'The stale lock directory must be removed'
     }
 
+    Invoke-Test 'treats a lock owned by a reused non-launcher PID as stale' {
+        $launchRoot = Join-Path $testRoot 'reused-pid'
+        $staleLock = Join-Path $launchRoot 'dsh-startup.lock'
+        New-Item -ItemType Directory -Force -Path $staleLock | Out-Null
+        # A live but unrelated process (not a PowerShell launcher) holding the
+        # recorded PID means the original runner died and its PID was reused;
+        # it must not keep the startup lock alive.
+        $intruder = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', 'ping -n 30 127.0.0.1 >nul') -WindowStyle Hidden -PassThru
+        try {
+            Set-Content -LiteralPath (Join-Path $staleLock 'pid.txt') -Value ([string]$intruder.Id) -Encoding ASCII
+
+            $stale = Invoke-StateHelper -Arguments @('-Action', 'TestStartupLock', '-LaunchRoot', $launchRoot)
+            Assert-Equal 0 $stale.ExitCode "Reused-PID inspection should succeed. Output:`n$($stale.Output)"
+            Assert-Match $stale.Output 'UNLOCKED' 'A reused non-launcher PID must not keep the startup lock live'
+            Assert-True (-not (Test-Path -LiteralPath $staleLock)) 'The reused-PID lock directory must be removed'
+        } finally {
+            if ($intruder -and -not $intruder.HasExited) {
+                Stop-Process -Id $intruder.Id -Force -ErrorAction SilentlyContinue
+                $intruder.WaitForExit()
+            }
+        }
+    }
+
     Invoke-Test 'reports only NOT RUNNING when status removes a stale startup lock' {
         $launchRoot = Join-Path $testRoot 'stale-status'
         $staleLock = Join-Path $launchRoot 'dsh-startup.lock'

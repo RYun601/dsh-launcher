@@ -23,6 +23,7 @@ $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\p
 $dshExitCode = 1
 $dshStarted = $false
 $ownsStartupLock = $false
+$script:currentStartupStage = ''
 
 if ($env:DSH_SUPPRESS_BROWSER_MONITOR -eq '1') {
     $SuppressBrowserMonitor = $true
@@ -42,6 +43,28 @@ function Add-RunnerLogLines {
         if ($null -ne $line) {
             Add-Content -LiteralPath $log -Encoding UTF8 -Value ([string]$line)
         }
+    }
+}
+
+function Set-RunnerStartupStage {
+    param([Parameter(Mandatory = $true)][string]$Line)
+
+    $stage = ''
+    if ($Line -match 'Preparing DeepSeek Harness runtime') { $stage = 'PREPARING_RUNTIME' }
+    elseif ($Line -match 'Validating existing DeepSeek Harness runtime') { $stage = 'VALIDATING_EXISTING_RUNTIME' }
+    elseif ($Line -match 'Installing (\d+) required DSH peer dependencies') { $stage = 'INSTALLING_PEERS:' + $Matches[1] }
+    elseif ($Line -match 'Repairing the incompatible React peer pair') { $stage = 'REPAIRING_REACT_PEERS' }
+    elseif ($Line -match 'Validating DSH runtime dependencies') { $stage = 'VALIDATING_RUNTIME' }
+    elseif ($Line -match 'Starting DeepSeek Harness web service') { $stage = 'STARTING_WEB' }
+
+    if (-not $stage -or $stage -eq $script:currentStartupStage) { return }
+    $script:currentStartupStage = $stage
+    try {
+        $stageOutput = @(& $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State STARTING `
+            -OwnerPid $PID -Version $Version -Message $stage 2>&1)
+        Add-RunnerLogLines -Lines $stageOutput
+    } catch {
+        Add-Content -LiteralPath $log -Encoding UTF8 -Value ('Startup stage write failed: ' + $_.Exception.Message)
     }
 }
 
@@ -116,6 +139,7 @@ try {
         $ErrorActionPreference = 'Continue'
         & $systemPowerShell @runArguments 2>&1 | ForEach-Object {
             Add-Content -LiteralPath $log -Encoding UTF8 -Value ([string]$_)
+            Set-RunnerStartupStage -Line ([string]$_)
         }
         $dshExitCode = $LASTEXITCODE
     } finally {

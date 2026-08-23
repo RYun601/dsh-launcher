@@ -13,6 +13,7 @@ try {
 } catch { }
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $dir 'dsh-version.ps1')
 
 # 0) 目标版本 = 各 dist-tag（latest/next/...）中的最高者（当前 next=0.1.0-rc.8）
 $latest = & (Join-Path $dir 'resolve-dsh-version.ps1')
@@ -35,7 +36,37 @@ if ($removed) {
     Write-Host '未发现 npx 缓存中的 DSH 工作区'
 }
 
-# 3) 重新后台启动（自动下载最新版 DSH）
+# 3) 同步 npm 全局安装的 `dsh` 命令：缺失时安装、旧于目标版本时升级，
+# 保证直接使用 `dsh web` 等命令的版本与 launcher 运行时一致。
+# 失败仅警告，不阻塞 launcher 运行时本身的升级。
+if ($latest) {
+    $globalPkg = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'
+    $globalVersion = ''
+    if (Test-Path -LiteralPath $globalPkg) {
+        try {
+            $globalVersion = [string](Get-Content -LiteralPath $globalPkg -Raw -Encoding UTF8 | ConvertFrom-Json).version
+        } catch { }
+    }
+    if (-not $globalVersion -or (Compare-DshVersion $globalVersion $latest) -lt 0) {
+        if ($globalVersion) {
+            Write-Host "正在升级全局 dsh 命令（$globalVersion -> $latest）..."
+        } else {
+            Write-Host "正在安装全局 dsh 命令（$latest）..."
+        }
+        try {
+            & npm.cmd install -g "@deepseek-ai/dsh@$latest"
+            if ($LASTEXITCODE -ne 0) { throw "npm install -g 退出码 $LASTEXITCODE" }
+            Write-Host "全局 dsh 已就绪（$latest），现在可直接使用 dsh 命令。"
+        } catch {
+            Write-Host "警告：全局 dsh 安装/升级失败：$($_.Exception.Message)"
+            Write-Host "可手动执行：npm install -g @deepseek-ai/dsh@$latest"
+        }
+    } else {
+        Write-Host "全局 dsh 已是最新（$globalVersion）。"
+    }
+}
+
+# 4) 重新后台启动（自动下载最新版 DSH）
 Write-Host '正在重新后台启动（会自动下载最新版 DSH）...'
 $upgradeTarget = if ($latest) { [string]$latest } else { 'latest' }
 & (Join-Path $dir 'start-background.ps1') -WaitForReady -TimeoutSeconds 900 -Version $upgradeTarget

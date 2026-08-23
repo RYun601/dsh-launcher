@@ -49,6 +49,9 @@ try {
         $startInfo.EnvironmentVariables['USERPROFILE'] = $profileRoot
         $startInfo.EnvironmentVariables['LOCALAPPDATA'] = (Join-Path $testRoot 'local-app-data')
         $startInfo.EnvironmentVariables['APPDATA'] = (Join-Path $testRoot 'app-data')
+        # Keep the registry fast path off the real network; the unreachable
+        # endpoint makes the resolver fall back to the fake npm command.
+        $startInfo.EnvironmentVariables['DSH_REGISTRY'] = 'http://127.0.0.1:9'
 
         $process = [Diagnostics.Process]::Start($startInfo)
         if (-not $process.WaitForExit(10000)) {
