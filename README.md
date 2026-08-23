@@ -107,13 +107,15 @@ cd dsh-launcher
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
 | `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
-| `deepseek --upgrade` | 一键升级：停止服务 → 清理旧 DSH npx 工作区 → 准备最新版运行时 → 重新后台启动 |
+| `deepseek --upgrade` | 一键升级：停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 准备最新版运行时 → 重新后台启动 |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
 | `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认） |
 | `deepseek --check` | 环境自检（脚本路径 / npm / 端口） |
 | `deepseek --help` | 查看帮助 |
 
 - 普通启动优先复用已经准备并校验过的本地 DSH 版本；存在可用本地运行时时不访问 npm。仅在没有可用运行时的首次启动或修复场景中准备依赖。使用 `deepseek --update` 从 npm 检查新版本，使用 `deepseek --upgrade` 安装并切换到新版本。
+- `deepseek --update` / `deepseek --upgrade` 默认直接查询 npm 公共 registry 的 dist-tags（比 `npm view` 更快）。如需使用镜像或私有 registry，可设置环境变量 `DSH_REGISTRY`（例如 `https://registry.npmmirror.com`）；该设置仅在查询远端发布版本时生效，不影响本地运行时启动。
+- `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则升级到最新版，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。
 
 ## 其他启动方式
 
