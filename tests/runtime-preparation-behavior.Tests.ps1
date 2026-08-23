@@ -34,6 +34,21 @@ function Invoke-Test {
     Write-Host "PASS: $Name"
 }
 
+# The fake node process appends to node.log while it runs; a read that races
+# with an in-progress write fails with IOException. Retry briefly so a transient
+# lock (also seen on busy CI runners) never fails the serialization test.
+function Get-NodeLogLineCount {
+    param([string]$Path)
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        try {
+            return @([IO.File]::ReadAllLines($Path)).Count
+        } catch [IO.IOException] {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    throw "node.log remained locked: $Path"
+}
+
 function Invoke-Runtime {
     param(
         [string]$SelectedRuntimeRoot = $runtimeRoot,
@@ -303,14 +318,14 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
                 $startInfo.EnvironmentVariables['DSH_TEST_NODE_DELAY'] = $delay
                 $processes += [Diagnostics.Process]::Start($startInfo)
                 if ($processes.Count -eq 1) {
-                    for ($attempt = 0; $attempt -lt 30 -and @([IO.File]::ReadAllLines($nodeLog)).Count -eq 0; $attempt++) {
+                    for ($attempt = 0; $attempt -lt 30 -and (Get-NodeLogLineCount -Path $nodeLog) -eq 0; $attempt++) {
                         Start-Sleep -Milliseconds 100
                     }
                 }
             }
 
             Start-Sleep -Milliseconds 300
-            Assert-Equal 1 @([IO.File]::ReadAllLines($nodeLog)).Count 'Only one process may execute from the shared runtime at a time'
+            Assert-Equal 1 (Get-NodeLogLineCount -Path $nodeLog) 'Only one process may execute from the shared runtime at a time'
             foreach ($process in $processes) {
                 Assert-Equal $true $process.WaitForExit(10000) 'Concurrent runtime test process did not finish'
                 Assert-Equal 0 $process.ExitCode "Serialized runtime process failed: $($process.StandardError.ReadToEnd())"
