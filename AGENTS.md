@@ -31,7 +31,7 @@
 - `run-dsh.ps1`：串行准备版本化运行时、修复必要 peer 依赖、执行 npm 审计并启动 Node 入口。
 - `dsh-version.ps1`：版本解析和比较的共享函数。
 - `update-check.ps1`：比较本地运行时、旧缓存、全局安装和 npm 最新版本。
-- `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、准备新运行时并重新后台启动。
+- `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、同步全局 `dsh` 命令（缺失则安装、旧版则升级）、准备新运行时并重新后台启动。
 
 ### 安装与维护
 
