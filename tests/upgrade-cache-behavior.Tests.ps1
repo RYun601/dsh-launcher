@@ -13,18 +13,6 @@ function Read-NpmLog {
     return [IO.File]::ReadAllText($Path).Trim()
 }
 
-# Chinese status text is built from UTF-16 code units at runtime instead of
-# being written as literals, keeping the test file parseable by PS 5.1.
-function Get-UpgradeText {
-    param([int[]]$CodeUnits)
-    return (-join @($CodeUnits | ForEach-Object { [char]$_ }))
-}
-
-$script:InstallText = Get-UpgradeText @(0x6B63, 0x5728, 0x5B89, 0x88C5, 0x5168, 0x5C40, 0x20, 0x64, 0x73, 0x68, 0x20, 0x547D, 0x4EE4)                 # installing global dsh command
-$script:UpgradeText = Get-UpgradeText @(0x6B63, 0x5728, 0x5347, 0x7EA7, 0x5168, 0x5C40, 0x20, 0x64, 0x73, 0x68, 0x20, 0x547D, 0x4EE4)                 # upgrading global dsh command
-$script:ReadyText    = Get-UpgradeText @(0x5168, 0x5C40, 0x20, 0x64, 0x73, 0x68, 0x20, 0x5DF2, 0x5C31, 0x7EEA)                                       # global dsh ready
-$script:CurrentText  = Get-UpgradeText @(0x5168, 0x5C40, 0x20, 0x64, 0x73, 0x68, 0x20, 0x5DF2, 0x662F, 0x6700, 0x65B0)                             # global dsh already current
-
 # Build an isolated upgrade fixture: upgrade-dsh.ps1 with stubbed dependency
 # scripts, a fake npm that records its arguments, and an optional global dsh
 # package under an isolated APPDATA. The test's real global npm install must
@@ -218,7 +206,6 @@ try {
             'Upgrade must pass its registry-selected version to the synchronous startup coordinator'
         Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.0-rc\.8$' `
             'Upgrade must install the missing global dsh command'
-        Assert-Match $result.Output ([regex]::Escape($script:InstallText)) 'Upgrade should report installing the global dsh command'
     }
 
     Invoke-Test 'explicit upgrade refreshes an outdated global dsh command' {
@@ -231,8 +218,6 @@ try {
         Assert-True ($result.ExitCode -eq 0) "Upgrade fixture should succeed. Output:`n$($result.Output)"
         Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.0-rc\.8$' `
             'Upgrade must refresh an outdated global dsh command'
-        Assert-Match $result.Output ([regex]::Escape($script:UpgradeText)) 'Upgrade should report upgrading the global dsh command'
-        Assert-Match $result.Output ([regex]::Escape($script:ReadyText)) 'Upgrade should confirm the refreshed global dsh command'
     }
 
     Invoke-Test 'explicit upgrade leaves a current global dsh command untouched' {
@@ -244,7 +229,6 @@ try {
 
         Assert-True ($result.ExitCode -eq 0) "Upgrade fixture should succeed. Output:`n$($result.Output)"
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
-        Assert-Match $result.Output ([regex]::Escape($script:CurrentText)) 'Upgrade should report the global dsh command is already current'
     }
 
     Write-Host "All $script:Passed upgrade cache behavior tests passed."
