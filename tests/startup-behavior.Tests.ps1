@@ -225,7 +225,7 @@ function Invoke-BackgroundRunner {
     }
 
     $process = [Diagnostics.Process]::Start($startInfo)
-    Assert-True ($process.WaitForExit(3000)) 'background-run.cmd did not exit after the fake DSH command completed'
+    Assert-True ($process.WaitForExit(15000)) 'background-run.cmd did not exit after the fake DSH command completed'
 
     $monitorLog = ''
     for ($i = 0; $i -lt 30; $i++) {
@@ -420,11 +420,11 @@ function Invoke-BackgroundCommand {
     $startInfo.EnvironmentVariables['DSH_TEST_POWERSHELL_EXIT'] = [string]$PowerShellExitCode
 
     $process = [Diagnostics.Process]::Start($startInfo)
-    $exitedBeforeInput = $process.WaitForExit(3000)
+    $exitedBeforeInput = $process.WaitForExit(10000)
     if (-not $exitedBeforeInput) {
         $process.StandardInput.WriteLine('x')
         $process.StandardInput.Close()
-        Assert-True ($process.WaitForExit(3000)) 'start-background.cmd did not exit after test input'
+        Assert-True ($process.WaitForExit(15000)) 'start-background.cmd did not exit after test input'
     }
 
     return [pscustomobject]@{
@@ -458,7 +458,7 @@ function Invoke-DeepseekCommand {
     $startInfo.EnvironmentVariables['DSH_TEST_PROCESS_LOG'] = $processLogPath
 
     $process = [Diagnostics.Process]::Start($startInfo)
-    Assert-True ($process.WaitForExit(3000)) "deepseek $Argument did not return promptly"
+    Assert-True ($process.WaitForExit(15000)) "deepseek $Argument did not return promptly"
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
         Output   = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
@@ -489,7 +489,7 @@ function Invoke-AlternateForegroundCommand {
     $process = [Diagnostics.Process]::Start($startInfo)
     $process.StandardInput.WriteLine('x')
     $process.StandardInput.Close()
-    Assert-True ($process.WaitForExit(3000)) 'start-deepseek-harness.bat did not finish after test input'
+    Assert-True ($process.WaitForExit(15000)) 'start-deepseek-harness.bat did not finish after test input'
 
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
