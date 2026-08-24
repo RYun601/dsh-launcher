@@ -190,6 +190,7 @@ if ($LASTEXITCODE -ne 0) { throw 'release package behavior test failed' }
 
 - git 提交信息（commit message）一律使用中文书写。
 - Release 说明（release notes）使用中英双语书写，方便中英文用户阅读。
+- GitHub Release 的显示标题必须严格等于标签 `v<VERSION>`；工作流中显式使用 `name: ${{ github.ref_name }}`，补写发布说明时不得改写标题。发行资产名保持为 `dsh-launcher.zip`。
 - 用户可见命令、参数、安装步骤、状态文本、默认路径或文件职责变化时，同时更新 `README.md` 和 `README.en.md`。
 - 新增或重命名发行时需要携带的文件时更新 `release-files.txt`，并运行发行包行为测试。
 - 只有准备新版本发布时才修改 `VERSION`。标签名必须严格等于 `v` 加 `VERSION` 内容。
