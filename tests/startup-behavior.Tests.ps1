@@ -246,6 +246,7 @@ function Invoke-ReservedRealBackgroundRunner {
     param(
         [string]$ScenarioName = 'reserved-real-runner',
         [int]$NodeDelaySeconds = 2,
+        [switch]$NodeWritesBlankLine,
         [switch]$NodeWritesStderr,
         [switch]$NodeWritesStages,
         [switch]$SkipMonitorInspection,
@@ -282,7 +283,7 @@ function Invoke-ReservedRealBackgroundRunner {
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
+        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_BLANK echo.`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
@@ -316,6 +317,9 @@ function Invoke-ReservedRealBackgroundRunner {
     }
     if ($NodeWritesStderr) {
         $startInfo.EnvironmentVariables['DSH_TEST_NODE_STDERR'] = '1'
+    }
+    if ($NodeWritesBlankLine) {
+        $startInfo.EnvironmentVariables['DSH_TEST_NODE_BLANK'] = '1'
     }
     if ($NodeWritesStages) {
         $startInfo.EnvironmentVariables['DSH_TEST_NODE_STAGES'] = '1'
@@ -613,6 +617,13 @@ try {
         Assert-Equal 0 $result.ExitCode "A successful DSH child must preserve exit code 0. Log:`n$($result.Log)`nOutput:`n$($result.Output)"
         Assert-Match $result.Log 'BENIGN_NODE_STDERR' 'Child stderr diagnostics must still be written to the UTF-8 runner log'
         Assert-NotMatch $result.Log 'Runner failure:' 'Child stderr is output, not a terminating runner exception'
+    }
+
+    Invoke-Test 'blank child output does not turn a successful DSH exit into runner failure' {
+        $result = Invoke-ReservedRealBackgroundRunner -ScenarioName 'runner-blank-output' `
+            -NodeDelaySeconds 0 -NodeWritesBlankLine -SuppressBrowserMonitor
+        Assert-Equal 0 $result.ExitCode "A blank child output line must preserve exit code 0. Log:`n$($result.Log)`nOutput:`n$($result.Output)"
+        Assert-NotMatch $result.Log 'Runner failure:' 'A blank child output line is valid output, not a runner exception'
     }
 
     Invoke-Test 'ten rapid PowerShell runner cycles all log and release their locks' {
