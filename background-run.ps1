@@ -47,7 +47,7 @@ function Add-RunnerLogLines {
 }
 
 function Set-RunnerStartupStage {
-    param([Parameter(Mandatory = $true)][string]$Line)
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
 
     $stage = ''
     if ($Line -match 'Preparing DeepSeek Harness runtime') { $stage = 'PREPARING_RUNTIME' }
