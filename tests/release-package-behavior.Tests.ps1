@@ -65,6 +65,8 @@ try {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'release-files.txt is missing' }
     $releaseWorkflow = Get-Content -LiteralPath $releaseWorkflowPath -Raw
     Assert-Match $releaseWorkflow 'github\.ref_name' 'Release workflow must inspect the pushed tag name'
+    Assert-Match $releaseWorkflow '(?m)^\s+name:\s+\$\{\{\s*github\.ref_name\s*\}\}\s*$' `
+        'Release workflow must set the GitHub Release title from the pushed tag'
     Assert-Match $releaseWorkflow 'VERSION' 'Release workflow must compare the tag with VERSION'
     $releaseFiles = @(Get-Content -LiteralPath $manifestPath | Where-Object { $_ -and -not $_.StartsWith('#') })
     if ($ArchivePath) {
