@@ -489,6 +489,88 @@ try {
         }
     }
 
+    Invoke-Test 'test hooks are inert without the explicit test mode gate' {
+        $identityRoot = Join-Path $testRoot 'identity-hook-gate'
+        $statusRoot = Join-Path $testRoot 'status-hook-gate'
+        $startupToken = '33343434343434343434343434343433'
+        $coordinatorScript = Join-Path $testRoot 'hook-gate-start-background.ps1'
+        $runnerScript = Join-Path $testRoot 'hook-gate-background-run.ps1'
+        $coordinator = Start-TestScriptProcess -ScriptPath $coordinatorScript
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $fixture = New-ClassifierFixture -Name 'hook-gate-classifier' `
+            -ClassificationState 'READY' -ServicePid 7199
+        try {
+            $identityLock = Invoke-StateHelper -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $identityRoot,
+                '-OwnerPid', $coordinator.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $coordinatorScript
+            )
+            Assert-Equal 0 $identityLock.ExitCode "The hook-gate identity lock should be created. Output:`n$($identityLock.Output)"
+            $identitySignal = Join-Path $testRoot 'disabled-identity-hook.signal'
+            $identityContinue = Join-Path $testRoot 'disabled-identity-hook.continue'
+            [IO.File]::WriteAllText($identityContinue, 'continue', [Text.Encoding]::ASCII)
+            Remove-Item Env:\DSH_TEST_MODE -ErrorAction SilentlyContinue
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL = $identitySignal
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE = $identityContinue
+            $env:DSH_TEST_IDENTITY_REPLACE_FAILURE = '1'
+            $identityTransfer = Invoke-StateHelper -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $identityRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript,
+                '-TransferOwnership'
+            )
+            Remove-Item Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+                Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE, `
+                Env:\DSH_TEST_IDENTITY_REPLACE_FAILURE -ErrorAction SilentlyContinue
+
+            $statusLock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $statusRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $statusLock.ExitCode "The hook-gate status lock should be created. Output:`n$($statusLock.Output)"
+            $statusState = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $statusRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-Version', 'hook-gate-version',
+                '-StartupToken', $startupToken, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $statusState.ExitCode "The hook-gate status state should be written. Output:`n$($statusState.Output)"
+            $statusSignal = Join-Path $testRoot 'disabled-status-hook.signal'
+            $statusContinue = Join-Path $testRoot 'disabled-status-hook.continue'
+            [IO.File]::WriteAllText($statusContinue, 'continue', [Text.Encoding]::ASCII)
+            $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $statusSignal
+            $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $statusContinue
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = [string]$fixture.ServicePid
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'GetStatus', '-LaunchRoot', $statusRoot, '-Port', 31989
+            )
+
+            Assert-Equal 0 $identityTransfer.ExitCode `
+                "Identity hook variables without test mode must not inject failure. Output:`n$($identityTransfer.Output)"
+            Assert-True (-not (Test-Path -LiteralPath $identitySignal)) `
+                'Identity hook variables without test mode must not write a signal file'
+            Assert-Equal 0 $status.ExitCode "Status hook variables without test mode must not pause or fail. Output:`n$($status.Output)"
+            Assert-True (-not (Test-Path -LiteralPath $statusSignal)) `
+                'Status hook variables without test mode must not write a signal file'
+        } finally {
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+                Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE, Env:\DSH_TEST_IDENTITY_REPLACE_FAILURE, `
+                Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
+                Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, `
+                Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            foreach ($process in @($coordinator, $runner)) {
+                if ($process -and -not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit()
+                }
+            }
+        }
+    }
+
     Invoke-Test 'identity replacement keeps the old or new authoritative record visible' {
         $launchRoot = Join-Path $testRoot 'identity-replace-visibility'
         $startupToken = '34343434343434343434343434343434'
@@ -511,6 +593,7 @@ try {
             $continuePath = Join-Path $testRoot 'identity-before-replace.continue'
             $transferOutput = Join-Path $testRoot 'identity-replace.out'
             $transferError = Join-Path $testRoot 'identity-replace.err'
+            $env:DSH_TEST_MODE = '1'
             $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL = $signalPath
             $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE = $continuePath
             $transfer = Start-StateHelperProcess -Arguments @(
@@ -548,7 +631,7 @@ try {
             Assert-Match $observed.Output "LOCKED $($runner.Id)" `
                 'Mixed legacy fields must not become authoritative after atomic replacement'
         } finally {
-            Remove-Item Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
                 Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE -ErrorAction SilentlyContinue
             if ($transfer -and -not $transfer.HasExited) {
                 Stop-Process -Id $transfer.Id -Force -ErrorAction SilentlyContinue
@@ -585,6 +668,7 @@ try {
             $continuePath = Join-Path $testRoot 'identity-before-failure.continue'
             $transferOutput = Join-Path $testRoot 'identity-failure.out'
             $transferError = Join-Path $testRoot 'identity-failure.err'
+            $env:DSH_TEST_MODE = '1'
             $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL = $signalPath
             $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE = $continuePath
             $env:DSH_TEST_IDENTITY_REPLACE_FAILURE = '1'
@@ -618,7 +702,7 @@ try {
             Assert-Match $observed.Output "LOCKED $($coordinator.Id)" `
                 'Mixed legacy fields must not take authority after replacement failure'
         } finally {
-            Remove-Item Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
                 Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE, `
                 Env:\DSH_TEST_IDENTITY_REPLACE_FAILURE -ErrorAction SilentlyContinue
             if ($transfer -and -not $transfer.HasExited) {
@@ -1010,6 +1094,7 @@ try {
             $continuePath = Join-Path $testRoot 'status-after-probe.continue'
             $statusOutput = Join-Path $testRoot 'status-probe.out'
             $statusError = Join-Path $testRoot 'status-probe.err'
+            $env:DSH_TEST_MODE = '1'
             $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
             $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
             $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
@@ -1058,7 +1143,7 @@ try {
             Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31996\|.*\|$tokenB\|$($runnerB.Id)\|" `
                 'After invalidation, GetStatus must classify the new token-B snapshot'
         } finally {
-            Remove-Item Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
                 Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
                 Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
             if ($statusProcess -and -not $statusProcess.HasExited) {
@@ -1104,6 +1189,7 @@ try {
             $continuePath = Join-Path $testRoot 'starting-after-probe.continue'
             $statusOutput = Join-Path $testRoot 'starting-revalidation.out'
             $statusError = Join-Path $testRoot 'starting-revalidation.err'
+            $env:DSH_TEST_MODE = '1'
             $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
             $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
             $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
@@ -1153,7 +1239,7 @@ try {
             Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31997\|.*\|$tokenB\|$($runnerB.Id)\|" `
                 'Status must retry classification against the new token-B snapshot'
         } finally {
-            Remove-Item Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
                 Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
                 Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
             if ($statusProcess -and -not $statusProcess.HasExited) {
@@ -1165,6 +1251,173 @@ try {
                     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
                     $process.WaitForExit()
                 }
+            }
+        }
+    }
+
+    Invoke-Test 'a recreated identical lock invalidates an in-flight status probe' {
+        $launchRoot = Join-Path $testRoot 'status-lock-aba'
+        $startupToken = '75757575757575757575757575757575'
+        $fixture = New-ClassifierFixture -Name 'status-lock-aba-classifier' `
+            -ClassificationState 'READY' -ServicePid 7201
+        $runnerScript = Join-Path $testRoot 'aba-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $statusProcess = $null
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The initial ABA lock should be acquired. Output:`n$($lock.Output)"
+            $state = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-Version', 'aba-version',
+                '-StartupToken', $startupToken, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $state.ExitCode "The ABA state should be written. Output:`n$($state.Output)"
+
+            $identityPath = Join-Path $launchRoot 'dsh-startup.lock\identity.json'
+            $oldCreatedAt = [string]((Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json).CreatedAt)
+            $signalPath = Join-Path $testRoot 'lock-aba-after-probe.signal'
+            $continuePath = Join-Path $testRoot 'lock-aba-after-probe.continue'
+            $statusOutput = Join-Path $testRoot 'lock-aba-status.out'
+            $statusError = Join-Path $testRoot 'lock-aba-status.err'
+            $env:DSH_TEST_MODE = '1'
+            $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
+            $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = [string]$fixture.ServicePid
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            $statusProcess = Start-StateHelperProcess -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', '31998'
+            ) -OutputPath $statusOutput -ErrorPath $statusError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $statusProcess.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) 'The ABA test must pause after its first probe'
+            $release = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'ReleaseStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken
+            )
+            Assert-Equal 'RELEASED' $release.Output 'The initial ABA lock should be released while probe is paused'
+            Start-Sleep -Milliseconds 30
+            $reacquired = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $reacquired.ExitCode "The identical ABA lock should be reacquired. Output:`n$($reacquired.Output)"
+            $newCreatedAt = [string]((Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json).CreatedAt)
+            Assert-True (-not [string]::Equals($oldCreatedAt, $newCreatedAt, [StringComparison]::Ordinal)) `
+                'The recreated lock fixture must have a distinct CreatedAt generation'
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $statusProcess.WaitForExit(15000) 'ABA status should finish after the hook continues'
+            $trace = @(Get-Content -LiteralPath $fixture.TracePath)
+            Assert-Equal 2 $trace.Count `
+                'A recreated lock with identical PID/token/paths must invalidate and repeat the stale probe'
+            $finalState = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'READY' $finalState.State 'The retried current lock generation may advance to READY'
+        } finally {
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, `
+                Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, Env:\DSH_TEST_CLASSIFIER_TRACE, `
+                Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
+                Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            if ($statusProcess -and -not $statusProcess.HasExited) {
+                Stop-Process -Id $statusProcess.Id -Force -ErrorAction SilentlyContinue
+                $statusProcess.WaitForExit()
+            }
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'a same-identity state generation change invalidates an in-flight probe' {
+        $launchRoot = Join-Path $testRoot 'status-state-generation'
+        $startupToken = '76767676767676767676767676767676'
+        $fixture = New-ClassifierFixture -Name 'status-state-generation-classifier' `
+            -ClassificationState 'READY' -ServicePid 7202
+        $runnerScript = Join-Path $testRoot 'generation-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $statusProcess = $null
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The generation lock should be acquired. Output:`n$($lock.Output)"
+            $state = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-Version', 'generation-version',
+                '-Message', 'initial phase', '-StartupToken', $startupToken,
+                '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $state.ExitCode "The generation state should be written. Output:`n$($state.Output)"
+            $statePath = Join-Path $launchRoot 'dsh-startup.json'
+            $oldUpdatedAt = [string]((Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json).UpdatedAt)
+
+            $signalPath = Join-Path $testRoot 'state-generation-after-probe.signal'
+            $continuePath = Join-Path $testRoot 'state-generation-after-probe.continue'
+            $statusOutput = Join-Path $testRoot 'state-generation-status.out'
+            $statusError = Join-Path $testRoot 'state-generation-status.err'
+            $env:DSH_TEST_MODE = '1'
+            $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
+            $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = [string]$fixture.ServicePid
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            $statusProcess = Start-StateHelperProcess -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', '31999'
+            ) -OutputPath $statusOutput -ErrorPath $statusError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $statusProcess.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) 'The state-generation test must pause after its first probe'
+            Start-Sleep -Milliseconds 30
+            $phaseUpdate = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-Version', 'ignored-version',
+                '-Message', 'updated phase', '-StartupToken', $startupToken,
+                '-RuntimeRoot', 'ignored-runtime', '-Entrypoint', 'ignored-entrypoint'
+            )
+            Assert-Equal 0 $phaseUpdate.ExitCode "The same-identity phase update should succeed. Output:`n$($phaseUpdate.Output)"
+            $updatedState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            Assert-True (-not [string]::Equals($oldUpdatedAt, [string]$updatedState.UpdatedAt, [StringComparison]::Ordinal)) `
+                'The phase update fixture must publish a distinct UpdatedAt generation'
+            Assert-Equal 'updated phase' $updatedState.Message 'The fixture must change a status decision field'
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $statusProcess.WaitForExit(15000) 'State-generation status should finish after the hook continues'
+            $trace = @(Get-Content -LiteralPath $fixture.TracePath)
+            Assert-Equal 2 $trace.Count `
+                'A same-identity UpdatedAt/message change must invalidate and repeat the stale probe'
+            $finalState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            Assert-Equal 'READY' $finalState.State 'The retried current state generation may advance to READY'
+        } finally {
+            Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, `
+                Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, Env:\DSH_TEST_CLASSIFIER_TRACE, `
+                Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
+                Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            if ($statusProcess -and -not $statusProcess.HasExited) {
+                Stop-Process -Id $statusProcess.Id -Force -ErrorAction SilentlyContinue
+                $statusProcess.WaitForExit()
+            }
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
             }
         }
     }

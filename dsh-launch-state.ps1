@@ -294,20 +294,22 @@ function Write-StartupLockMetadata {
     )
     try {
         if (Test-Path -LiteralPath $Paths.LockIdentity) {
-            $signalPath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL
-            $continuePath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE
-            if ($signalPath -and $continuePath -and -not (Test-Path -LiteralPath $signalPath)) {
-                [IO.File]::WriteAllText($signalPath, 'ready', [Text.Encoding]::ASCII)
-                $deadline = [DateTime]::UtcNow.AddSeconds(15)
-                while (-not (Test-Path -LiteralPath $continuePath)) {
-                    if ([DateTime]::UtcNow -ge $deadline) {
-                        throw 'Timed out waiting for the identity replacement test hook'
+            if ($env:DSH_TEST_MODE -eq '1') {
+                $signalPath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL
+                $continuePath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE
+                if ($signalPath -and $continuePath -and -not (Test-Path -LiteralPath $signalPath)) {
+                    [IO.File]::WriteAllText($signalPath, 'ready', [Text.Encoding]::ASCII)
+                    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+                    while (-not (Test-Path -LiteralPath $continuePath)) {
+                        if ([DateTime]::UtcNow -ge $deadline) {
+                            throw 'Timed out waiting for the identity replacement test hook'
+                        }
+                        Start-Sleep -Milliseconds 25
                     }
-                    Start-Sleep -Milliseconds 25
                 }
-            }
-            if ($env:DSH_TEST_IDENTITY_REPLACE_FAILURE -eq '1') {
-                throw 'Injected identity replacement failure'
+                if ($env:DSH_TEST_IDENTITY_REPLACE_FAILURE -eq '1') {
+                    throw 'Injected identity replacement failure'
+                }
             }
             try {
                 [IO.File]::Replace($temporaryIdentityPath, $Paths.LockIdentity, $backupIdentityPath)
@@ -575,13 +577,14 @@ function Test-StartupStatusSnapshotMatch {
         [Parameter(Mandatory = $true)][pscustomobject]$Actual
     )
 
-    if ($Expected.LockIsLive -ne $Actual.LockIsLive -or
-            $Expected.Lock.Exists -ne $Actual.Lock.Exists -or
-            $Expected.Lock.OwnerPid -ne $Actual.Lock.OwnerPid -or
-            -not [string]::Equals([string]$Expected.Lock.Token, [string]$Actual.Lock.Token, [StringComparison]::Ordinal) -or
-            -not [string]::Equals([string]$Expected.Lock.CommandPath, [string]$Actual.Lock.CommandPath, [StringComparison]::OrdinalIgnoreCase) -or
-            -not [string]::Equals([string]$Expected.Lock.ScriptPath, [string]$Actual.Lock.ScriptPath, [StringComparison]::OrdinalIgnoreCase)) {
+    if ($Expected.LockIsLive -ne $Actual.LockIsLive) {
         return $false
+    }
+    foreach ($propertyName in @('Exists', 'OwnerPid', 'Token', 'CommandPath', 'ScriptPath', 'CreatedAt')) {
+        if (-not (Test-StatusSnapshotPropertyMatch -Expected $Expected.Lock -Actual $Actual.Lock `
+                -PropertyName $propertyName)) {
+            return $false
+        }
     }
 
     if (($null -eq $Expected.StartupState) -ne ($null -eq $Actual.StartupState)) {
@@ -591,27 +594,45 @@ function Test-StartupStatusSnapshotMatch {
         return $true
     }
 
-    return [string]::Equals(
-            [string]$Expected.StartupState.State,
-            [string]$Actual.StartupState.State,
-            [StringComparison]::Ordinal) -and
-        $Expected.RunnerPid -eq $Actual.RunnerPid -and
-        [int]$Expected.StartupState.ServicePid -eq [int]$Actual.StartupState.ServicePid -and
-        [string]::Equals(
-            [string]$Expected.StartupState.StartupToken,
-            [string]$Actual.StartupState.StartupToken,
-            [StringComparison]::Ordinal) -and
-        [string]::Equals(
-            [string]$Expected.StartupState.Entrypoint,
-            [string]$Actual.StartupState.Entrypoint,
-            [StringComparison]::OrdinalIgnoreCase) -and
-        [string]::Equals(
-            [string]$Expected.StartupState.Version,
-            [string]$Actual.StartupState.Version,
-            [StringComparison]::Ordinal)
+    if ($Expected.RunnerPid -ne $Actual.RunnerPid) {
+        return $false
+    }
+    foreach ($propertyName in @(
+            'State', 'Pid', 'RunnerPid', 'ServicePid', 'StartupToken', 'RuntimeRoot',
+            'Entrypoint', 'Version', 'StartedAt', 'UpdatedAt', 'Message', 'ExitCode')) {
+        if (-not (Test-StatusSnapshotPropertyMatch -Expected $Expected.StartupState `
+                -Actual $Actual.StartupState -PropertyName $propertyName)) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Test-StatusSnapshotPropertyMatch {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Expected,
+        [Parameter(Mandatory = $true)][pscustomobject]$Actual,
+        [Parameter(Mandatory = $true)][string]$PropertyName
+    )
+
+    $expectedProperty = $Expected.PSObject.Properties[$PropertyName]
+    $actualProperty = $Actual.PSObject.Properties[$PropertyName]
+    if (($null -eq $expectedProperty) -ne ($null -eq $actualProperty)) {
+        return $false
+    }
+    if ($null -eq $expectedProperty) {
+        return $true
+    }
+
+    $expectedJson = ConvertTo-Json -InputObject $expectedProperty.Value -Compress -Depth 3
+    $actualJson = ConvertTo-Json -InputObject $actualProperty.Value -Compress -Depth 3
+    return [string]::Equals($expectedJson, $actualJson, [StringComparison]::Ordinal)
 }
 
 function Invoke-StatusAfterProbeTestHook {
+    if ($env:DSH_TEST_MODE -ne '1') {
+        return
+    }
     $signalPath = $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL
     $continuePath = $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE
     if (-not $signalPath -or -not $continuePath -or (Test-Path -LiteralPath $signalPath)) {
