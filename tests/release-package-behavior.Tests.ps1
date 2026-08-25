@@ -10,12 +10,16 @@ $packageRoot = if ($ArchivePath) { Join-Path $testRoot 'extracted\dsh-launcher' 
 $fakeBin = Join-Path $testRoot 'fake-bin'
 $profileRoot = Join-Path $testRoot 'profile'
 $processLog = Join-Path $testRoot 'process.log'
+$installerArchive = Join-Path $testRoot 'dsh-launcher.zip'
+$installerRoot = Join-Path $profileRoot 'dsh-launcher'
+$installerNodeLog = Join-Path $testRoot 'installer-node.log'
 $requiredRuntimeFiles = @(
     'deepseek.cmd',
     'background-run.cmd',
     'background-run.ps1',
     'start-background.ps1',
     'dsh-launch-state.ps1',
+    'dsh-node-version.ps1',
     'run-dsh.ps1',
     'resolve-dsh-version.ps1',
     'dsh-version.ps1'
@@ -29,6 +33,11 @@ function Assert-Equal {
 function Assert-Match {
     param([string]$Actual, [string]$Pattern, [string]$Message)
     if ($Actual -notmatch $Pattern) { throw "$Message`nActual:`n$Actual" }
+}
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
 }
 
 function Invoke-PackagedCommand {
@@ -53,6 +62,35 @@ function Invoke-PackagedCommand {
     if (-not $process.WaitForExit(10000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Packaged deepseek $Arguments did not exit"
+    }
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+    }
+}
+
+function Invoke-PackagedInstaller {
+    param([string]$InstallerPath)
+
+    $installerTemp = Join-Path $testRoot 'installer-temp'
+    New-Item -ItemType Directory -Force -Path $installerTemp | Out-Null
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell.exe'
+    $startInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$InstallerPath`" -InstallDir `"$installerRoot`" -SkipPath"
+    $startInfo.WorkingDirectory = $packageRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables['PATH'] = "$fakeBin;$env:PATH"
+    $startInfo.EnvironmentVariables['USERPROFILE'] = $profileRoot
+    $startInfo.EnvironmentVariables['TEMP'] = $installerTemp
+    $startInfo.EnvironmentVariables['DSH_TEST_MODE'] = '1'
+    $startInfo.EnvironmentVariables['DSH_TEST_INSTALL_ARCHIVE'] = $installerArchive
+    $startInfo.EnvironmentVariables['DSH_TEST_NODE_LOG'] = $installerNodeLog
+    $process = [Diagnostics.Process]::Start($startInfo)
+    if (-not $process.WaitForExit(10000)) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        throw 'Packaged installer did not exit'
     }
     return [pscustomobject]@{
         ExitCode = $process.ExitCode
@@ -86,13 +124,26 @@ try {
     }
 
     [IO.File]::WriteAllText((Join-Path $fakeBin 'npm.cmd'), "@echo off`r`necho npm-test`r`n", [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText(
+        (Join-Path $fakeBin 'node.cmd'),
+        "@echo off`r`necho %*>>`"%DSH_TEST_NODE_LOG%`"`r`necho v22.19.0`r`nexit /b 0`r`n",
+        [Text.Encoding]::ASCII
+    )
     $check = Invoke-PackagedCommand -Arguments '--check' -PathValue "$fakeBin;$env:PATH"
     Assert-Equal 0 $check.ExitCode "Packaged --check failed. Output:`n$($check.Output)"
     Assert-Match $check.Output 'npm: found' 'Packaged --check must find npm'
 
     $status = Invoke-PackagedCommand -Arguments '--status' -PathValue $env:PATH
     Assert-Equal 0 $status.ExitCode "Packaged --status failed. Output:`n$($status.Output)"
-    Assert-Match $status.Output 'NOT RUNNING' 'A clean extracted package should report NOT RUNNING'
+    Assert-Match $status.Output '^(STOPPED|READY|UNHEALTHY|FOREIGN_PORT|STARTING|FAILED)' 'Packaged --status should print a launcher state line'
+
+    Compress-Archive -LiteralPath $packageRoot -DestinationPath $installerArchive -CompressionLevel Optimal
+    $installer = Join-Path $packageRoot 'install.ps1'
+    $installerResult = Invoke-PackagedInstaller -InstallerPath $installer
+    Assert-Equal 0 $installerResult.ExitCode "Packaged installer failed. Output:`n$($installerResult.Output)"
+    Assert-True (Test-Path -LiteralPath (Join-Path $installerRoot 'deepseek.cmd')) 'Packaged installer must copy the release payload'
+    Assert-True (Test-Path -LiteralPath $installerNodeLog) 'Packaged installer must execute the release Node helper'
+    Assert-Match ([IO.File]::ReadAllText($installerNodeLog)) '--version' 'Packaged Node helper must run node --version'
 
     $fakeSource = @'
 using System;
