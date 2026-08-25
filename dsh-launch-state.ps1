@@ -83,6 +83,8 @@ function Get-StartupPaths {
     return [pscustomobject]@{
         Root      = $Root
         Lock      = Join-Path $Root 'dsh-startup.lock'
+        LockGuard = Join-Path $Root 'dsh-startup.lock.guard'
+        LockIdentity = Join-Path (Join-Path $Root 'dsh-startup.lock') 'identity.json'
         LockOwner = Join-Path (Join-Path $Root 'dsh-startup.lock') 'pid.txt'
         LockToken = Join-Path (Join-Path $Root 'dsh-startup.lock') 'token.txt'
         LockCommandPath = Join-Path (Join-Path $Root 'dsh-startup.lock') 'command-path.txt'
@@ -109,6 +111,36 @@ function ConvertTo-NormalizedPath {
         return [IO.Path]::GetFullPath($Path)
     } catch {
         return ''
+    }
+}
+
+function Enter-StartupLockGuard {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Paths)
+
+    Ensure-LaunchRoot -Root $Paths.Root
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    while ($true) {
+        try {
+            return [IO.File]::Open(
+                $Paths.LockGuard,
+                [IO.FileMode]::OpenOrCreate,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None
+            )
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw 'Timed out waiting for the startup lock serialization guard'
+            }
+            Start-Sleep -Milliseconds 25
+        }
+    }
+}
+
+function Exit-StartupLockGuard {
+    param($Guard)
+
+    if ($Guard) {
+        $Guard.Dispose()
     }
 }
 
@@ -175,6 +207,29 @@ function Get-StartupLockInfo {
         } catch { }
     }
 
+    if (Test-Path -LiteralPath $Paths.LockIdentity) {
+        try {
+            $identity = Get-Content -LiteralPath $Paths.LockIdentity -Raw | ConvertFrom-Json
+            return [pscustomobject]@{
+                Exists = $true
+                OwnerPid = [int]$identity.OwnerPid
+                Token = [string]$identity.Token
+                CommandPath = [string]$identity.CommandPath
+                ScriptPath = [string]$identity.ScriptPath
+                CreatedAt = [string]$identity.CreatedAt
+            }
+        } catch {
+            return [pscustomobject]@{
+                Exists = $true
+                OwnerPid = 0
+                Token = ''
+                CommandPath = ''
+                ScriptPath = ''
+                CreatedAt = ''
+            }
+        }
+    }
+
     $commandPath = ''
     if (Test-Path -LiteralPath $Paths.LockCommandPath) {
         try { $commandPath = (Get-Content -LiteralPath $Paths.LockCommandPath -Raw).Trim() } catch { }
@@ -211,8 +266,32 @@ function Write-StartupLockMetadata {
     if ($NewToken) {
         Set-Content -LiteralPath $Paths.LockToken -Value $NewToken -Encoding ASCII
     }
+    $currentLock = if ($PreserveCreatedAt) { Get-StartupLockInfo -Paths $Paths } else { $null }
     $normalizedCommandPath = ConvertTo-NormalizedPath -Path $NewCommandPath
+    if (-not $normalizedCommandPath -and $currentLock) { $normalizedCommandPath = [string]$currentLock.CommandPath }
     $normalizedScriptPath = ConvertTo-NormalizedPath -Path $NewScriptPath
+    if (-not $normalizedScriptPath -and $currentLock) { $normalizedScriptPath = [string]$currentLock.ScriptPath }
+    $effectiveToken = if ($NewToken) { $NewToken } elseif ($currentLock) { [string]$currentLock.Token } else { '' }
+    $createdAt = if ($PreserveCreatedAt) {
+        if ($currentLock.CreatedAt) { [string]$currentLock.CreatedAt } else { [DateTime]::UtcNow.ToString('o') }
+    } else {
+        [DateTime]::UtcNow.ToString('o')
+    }
+    $identity = [ordered]@{
+        SchemaVersion = 1
+        OwnerPid = $NewOwnerPid
+        Token = $effectiveToken
+        CommandPath = $normalizedCommandPath
+        ScriptPath = $normalizedScriptPath
+        CreatedAt = $createdAt
+    }
+    $temporaryIdentityPath = Join-Path $Paths.Lock ('identity-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    [IO.File]::WriteAllText(
+        $temporaryIdentityPath,
+        ($identity | ConvertTo-Json -Depth 3),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Move-Item -LiteralPath $temporaryIdentityPath -Destination $Paths.LockIdentity -Force
     if ($normalizedCommandPath) {
         [IO.File]::WriteAllText($Paths.LockCommandPath, $normalizedCommandPath, [Text.UTF8Encoding]::new($false))
     }
@@ -220,7 +299,7 @@ function Write-StartupLockMetadata {
         [IO.File]::WriteAllText($Paths.LockScriptPath, $normalizedScriptPath, [Text.UTF8Encoding]::new($false))
     }
     if (-not $PreserveCreatedAt -or -not (Test-Path -LiteralPath $Paths.LockCreatedAt)) {
-        Set-Content -LiteralPath $Paths.LockCreatedAt -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
+        Set-Content -LiteralPath $Paths.LockCreatedAt -Value $createdAt -Encoding ASCII
     }
     Set-Content -LiteralPath $Paths.LockOwner -Value $NewOwnerPid -Encoding ASCII
 }
@@ -262,6 +341,25 @@ function Remove-StaleStartupLock {
     return $true
 }
 
+function Test-NewStartupStateIdentityAuthorized {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [int]$NewOwnerPid,
+        [string]$NewStartupToken
+    )
+
+    if ($NewOwnerPid -le 0 -or -not $NewStartupToken) {
+        return $false
+    }
+    $lock = Get-StartupLockInfo -Paths $Paths
+    if (-not $lock.Exists -or $lock.OwnerPid -ne $NewOwnerPid -or
+            -not [string]::Equals($lock.Token, $NewStartupToken, [StringComparison]::Ordinal)) {
+        return $false
+    }
+    return Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
+        -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath
+}
+
 function Read-StartupState {
     param([Parameter(Mandatory = $true)][pscustomobject]$Paths)
 
@@ -295,10 +393,25 @@ function Write-StartupStateFile {
     )
 
     Ensure-LaunchRoot -Root $Paths.Root
+    $existing = Read-StartupState -Paths $Paths
+    $existingStartupToken = if ($existing -and $existing.StartupToken) {
+        [string]$existing.StartupToken
+    } else {
+        ''
+    }
+    $matchesExistingIdentity = $existingStartupToken -and $NewStartupToken -and [string]::Equals(
+        $existingStartupToken,
+        $NewStartupToken,
+        [StringComparison]::Ordinal)
+    $replacesExistingIdentity = $NewState -eq 'STARTING' -and
+        (Test-NewStartupStateIdentityAuthorized -Paths $Paths -NewOwnerPid $NewOwnerPid `
+            -NewStartupToken $NewStartupToken)
+    if ($existingStartupToken -and -not $matchesExistingIdentity -and -not $replacesExistingIdentity) {
+        throw 'Startup state identity does not match the existing startup token'
+    }
     if ($NewState -eq 'RUNNING') {
         $NewState = 'READY'
     }
-    $existing = Read-StartupState -Paths $Paths
     $newIdentity = $NewState -eq 'STARTING' -and $NewStartupToken -and
         (-not $existing -or -not [string]::Equals(
             [string]$existing.StartupToken,
@@ -384,11 +497,16 @@ function Write-Status {
         [int]$ServicePort = 3080
     )
 
-    $lock = Get-StartupLockInfo -Paths $Paths
-    $lockIsLive = $lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-        -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)
-    if ($lock.Exists -and -not $lockIsLive) {
-        Remove-StaleStartupLock -Paths $Paths | Out-Null
+    $guard = Enter-StartupLockGuard -Paths $Paths
+    try {
+        $lock = Get-StartupLockInfo -Paths $Paths
+        $lockIsLive = $lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
+            -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)
+        if ($lock.Exists -and -not $lockIsLive) {
+            Remove-StaleStartupLock -Paths $Paths | Out-Null
+        }
+    } finally {
+        Exit-StartupLockGuard -Guard $guard
     }
 
     $startupState = Read-StartupState -Paths $Paths
@@ -401,14 +519,23 @@ function Write-Status {
     }
     $hasStartupEvidence = $startupState -and $startupState.Entrypoint -and
         $startupState.StartupToken -and $runnerPid -gt 0
-    if ($hasStartupEvidence -and $startupState.State -in @('STARTING', 'READY')) {
+    $startingLockMatchesState = $startupState -and $startupState.State -eq 'STARTING' -and
+        $lockIsLive -and $lock.OwnerPid -eq $runnerPid -and [string]::Equals(
+            [string]$lock.Token,
+            [string]$startupState.StartupToken,
+            [StringComparison]::Ordinal)
+    if ($hasStartupEvidence -and ($startupState.State -eq 'READY' -or $startingLockMatchesState)) {
         if ($startupState.State -eq 'READY') {
+            $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
+            if ($recordedServicePid -le 0) {
+                Write-Output 'UNHEALTHY (stored READY state has no service PID evidence)'
+                return
+            }
             $classification = Get-DshServiceClassification -Port $ServicePort `
                 -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
                 -ExpectedStartupToken ([string]$startupState.StartupToken) `
                 -RunnerPid $runnerPid
-            $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
-            if ($classification.State -eq 'READY' -and $recordedServicePid -gt 0 -and
+            if ($classification.State -eq 'READY' -and
                     [int]$classification.ServicePid -ne $recordedServicePid) {
                 Write-Output "UNHEALTHY - PID $($classification.ServicePid) (service identity changed)"
                 return
@@ -441,9 +568,8 @@ function Write-Status {
         }
     }
 
-    if ($lockIsLive -or ($startupState -and $startupState.State -eq 'STARTING' -and $runnerPid -gt 0 -and
-            (Get-Process -Id $runnerPid -ErrorAction SilentlyContinue))) {
-        $owner = if ($lockIsLive) { $lock.OwnerPid } else { $startupState.Pid }
+    if ($lockIsLive) {
+        $owner = $lock.OwnerPid
         $versionSuffix = if ($startupState -and $startupState.Version) { " - version $($startupState.Version)" } else { '' }
         Write-Output "STARTING - PID $owner$versionSuffix"
         return
@@ -479,93 +605,118 @@ switch ($Action) {
         if ($OwnerPid -le 0) { throw 'AcquireStartupLock requires a live owner PID' }
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
         Ensure-LaunchRoot -Root $paths.Root
+        $guard = Enter-StartupLockGuard -Paths $paths
         try {
-            New-Item -ItemType Directory -Path $paths.Lock -ErrorAction Stop | Out-Null
-        } catch [IO.IOException] {
-            $existing = Get-StartupLockInfo -Paths $paths
-            $matchingToken = $StartupToken -and $existing.Token -and
-                [string]::Equals($existing.Token, $StartupToken, [StringComparison]::Ordinal)
-            $matchingLegacyOwner = -not $StartupToken -and -not $existing.Token -and
-                $existing.OwnerPid -eq $OwnerPid
-            if ($matchingToken) {
-                if ($TransferOwnership) {
-                    Write-StartupLockMetadata -Paths $paths -NewOwnerPid $OwnerPid -NewToken $StartupToken `
-                        -NewCommandPath $CommandPath -NewScriptPath $ScriptPath -PreserveCreatedAt
-                    Write-Output "OWNED $OwnerPid"
-                } else {
-                    Write-Output "OWNED $($existing.OwnerPid)"
-                }
-                exit 0
-            }
-            if ($matchingLegacyOwner) {
-                Write-Output "OWNED $OwnerPid"
-                exit 0
-            }
-            Remove-StaleStartupLock -Paths $paths | Out-Null
             try {
                 New-Item -ItemType Directory -Path $paths.Lock -ErrorAction Stop | Out-Null
             } catch [IO.IOException] {
                 $existing = Get-StartupLockInfo -Paths $paths
-                Write-Output "LOCKED $($existing.OwnerPid)"
-                exit 2
+                $matchingToken = $StartupToken -and $existing.Token -and
+                    [string]::Equals($existing.Token, $StartupToken, [StringComparison]::Ordinal)
+                $matchingLegacyOwner = -not $StartupToken -and -not $existing.Token -and
+                    $existing.OwnerPid -eq $OwnerPid
+                if ($matchingToken) {
+                    if ($TransferOwnership) {
+                        Write-StartupLockMetadata -Paths $paths -NewOwnerPid $OwnerPid -NewToken $StartupToken `
+                            -NewCommandPath $CommandPath -NewScriptPath $ScriptPath -PreserveCreatedAt
+                        Write-Output "OWNED $OwnerPid"
+                    } else {
+                        Write-Output "OWNED $($existing.OwnerPid)"
+                    }
+                    exit 0
+                }
+                if ($matchingLegacyOwner) {
+                    Write-Output "OWNED $OwnerPid"
+                    exit 0
+                }
+                Remove-StaleStartupLock -Paths $paths | Out-Null
+                try {
+                    New-Item -ItemType Directory -Path $paths.Lock -ErrorAction Stop | Out-Null
+                } catch [IO.IOException] {
+                    $existing = Get-StartupLockInfo -Paths $paths
+                    Write-Output "LOCKED $($existing.OwnerPid)"
+                    exit 2
+                }
             }
+            Write-StartupLockMetadata -Paths $paths -NewOwnerPid $OwnerPid -NewToken $StartupToken `
+                -NewCommandPath $CommandPath -NewScriptPath $ScriptPath
+            Write-Output "ACQUIRED $OwnerPid"
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
         }
-        Write-StartupLockMetadata -Paths $paths -NewOwnerPid $OwnerPid -NewToken $StartupToken `
-            -NewCommandPath $CommandPath -NewScriptPath $ScriptPath
-        Write-Output "ACQUIRED $OwnerPid"
     }
 
     'TestStartupLock' {
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
-        $lock = Get-StartupLockInfo -Paths $paths
-        if ($lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-                -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)) {
-            Write-Output "LOCKED $($lock.OwnerPid)"
-        } else {
-            if ($lock.Exists) {
-                Remove-StaleStartupLock -Paths $paths | Out-Null
+        $guard = Enter-StartupLockGuard -Paths $paths
+        try {
+            $lock = Get-StartupLockInfo -Paths $paths
+            if ($lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
+                    -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)) {
+                Write-Output "LOCKED $($lock.OwnerPid)"
+            } else {
+                if ($lock.Exists) {
+                    Remove-StaleStartupLock -Paths $paths | Out-Null
+                }
+                Write-Output 'UNLOCKED'
             }
-            Write-Output 'UNLOCKED'
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
         }
     }
 
     'ReleaseStartupLock' {
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
-        $lock = Get-StartupLockInfo -Paths $paths
-        $ownsLock = if ($StartupToken) {
-            $lock.Token -and [string]::Equals($lock.Token, $StartupToken, [StringComparison]::Ordinal) -and
-                ($OwnerPid -le 0 -or $lock.OwnerPid -eq $OwnerPid)
-        } else {
-            -not $lock.Token -and ($OwnerPid -le 0 -or $lock.OwnerPid -eq $OwnerPid)
-        }
-        if ($lock.Exists -and $ownsLock) {
-            Remove-Item -LiteralPath $paths.Lock -Recurse -Force -ErrorAction Stop
-            Write-Output 'RELEASED'
-        } else {
-            Write-Output 'UNCHANGED'
+        $guard = Enter-StartupLockGuard -Paths $paths
+        try {
+            $lock = Get-StartupLockInfo -Paths $paths
+            $ownsLock = if ($StartupToken) {
+                $lock.Token -and [string]::Equals($lock.Token, $StartupToken, [StringComparison]::Ordinal) -and
+                    ($OwnerPid -le 0 -or $lock.OwnerPid -eq $OwnerPid)
+            } else {
+                -not $lock.Token -and ($OwnerPid -le 0 -or $lock.OwnerPid -eq $OwnerPid)
+            }
+            if ($lock.Exists -and $ownsLock) {
+                Remove-Item -LiteralPath $paths.Lock -Recurse -Force -ErrorAction Stop
+                Write-Output 'RELEASED'
+            } else {
+                Write-Output 'UNCHANGED'
+            }
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
         }
     }
 
     'WriteStartupState' {
         if (-not $State) { throw 'WriteStartupState requires State' }
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
-        Write-StartupStateFile -Paths $paths -NewState $State -NewOwnerPid $OwnerPid `
-            -NewServicePid $ServicePid -NewVersion $Version -NewMessage $Message `
-            -NewExitCode $ExitCode -NewStartupToken $StartupToken -NewRuntimeRoot $RuntimeRoot `
-            -NewEntrypoint $Entrypoint
+        $guard = Enter-StartupLockGuard -Paths $paths
+        try {
+            Write-StartupStateFile -Paths $paths -NewState $State -NewOwnerPid $OwnerPid `
+                -NewServicePid $ServicePid -NewVersion $Version -NewMessage $Message `
+                -NewExitCode $ExitCode -NewStartupToken $StartupToken -NewRuntimeRoot $RuntimeRoot `
+                -NewEntrypoint $Entrypoint
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
+        }
     }
 
     'RecordStartupExit' {
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
-        $startupState = Read-StartupState -Paths $paths
-        if (-not $startupState -or $startupState.State -eq 'STARTING') {
-            $owner = if ($startupState -and $startupState.Pid) { [int]$startupState.Pid } else { $OwnerPid }
-            $stateVersion = if ($startupState -and $startupState.Version) { [string]$startupState.Version } else { $Version }
-            $failureMessage = if ($Message) { $Message } else { 'DSH exited before readiness' }
-            Write-StartupStateFile -Paths $paths -NewState 'FAILED' -NewOwnerPid $owner `
-                -NewServicePid 0 -NewVersion $stateVersion -NewMessage $failureMessage `
-                -NewExitCode $ExitCode -NewStartupToken $StartupToken `
-                -NewRuntimeRoot $RuntimeRoot -NewEntrypoint $Entrypoint
+        $guard = Enter-StartupLockGuard -Paths $paths
+        try {
+            $startupState = Read-StartupState -Paths $paths
+            if (-not $startupState -or $startupState.State -eq 'STARTING') {
+                $owner = if ($startupState -and $startupState.Pid) { [int]$startupState.Pid } else { $OwnerPid }
+                $stateVersion = if ($startupState -and $startupState.Version) { [string]$startupState.Version } else { $Version }
+                $failureMessage = if ($Message) { $Message } else { 'DSH exited before readiness' }
+                Write-StartupStateFile -Paths $paths -NewState 'FAILED' -NewOwnerPid $owner `
+                    -NewServicePid 0 -NewVersion $stateVersion -NewMessage $failureMessage `
+                    -NewExitCode $ExitCode -NewStartupToken $StartupToken `
+                    -NewRuntimeRoot $RuntimeRoot -NewEntrypoint $Entrypoint
+            }
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
         }
     }
 
