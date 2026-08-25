@@ -94,7 +94,7 @@ $script:PhaseWeb = Get-PhaseText @(0x6B63, 0x5728, 0x542F, 0x52A8, 0x20, 0x57, 0
 
 function Invoke-StartScenario {
     param(
-        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'Staged')]
+        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy', 'Staged')]
         [string]$Scenario,
         [string]$ScenarioName = $Scenario,
         [ValidateRange(1, 65535)]
@@ -283,7 +283,7 @@ function Invoke-ReservedRealBackgroundRunner {
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_BLANK echo.`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
+        "@echo off`r`necho v22.20.0`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_BLANK echo.`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
@@ -525,6 +525,54 @@ try {
         Assert-Match $occupied.ProcessLog "GET_NET_TCP_CONNECTION`t$occupiedPort" 'Occupied port must resolve its owner for diagnostics'
     }
 
+    Invoke-Test 'foreign port occupant is reported FOREIGN_PORT without opening a browser' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $foreignPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $foreign = Invoke-StartScenario -Scenario OccupiedForeign -ScenarioName 'foreign-occupied' -Port $foreignPort
+        } finally {
+            $listener.Stop()
+        }
+
+        Assert-Equal 1 $foreign.ExitCode "A foreign port occupant must refuse reuse. Output:`n$($foreign.Output)"
+        Assert-Match $foreign.Output 'FOREIGN_PORT' 'The refusal must name the FOREIGN_PORT state'
+        Assert-NotMatch $foreign.ProcessLog '(?m)^http://127\.0\.0\.1:' 'A foreign occupant must not open a browser'
+        Assert-NotMatch $foreign.ProcessLog 'background-run\.(?:cmd|ps1)' 'A foreign occupant must not submit another runner'
+    }
+
+    Invoke-Test 'DSH-identified healthy occupant is reused and the browser is opened once' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $dshPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $existing = Invoke-StartScenario -Scenario OccupiedReady -ScenarioName 'dsh-occupied-ready' -Port $dshPort
+        } finally {
+            $listener.Stop()
+        }
+
+        Assert-Equal 0 $existing.ExitCode "A healthy DSH-identified occupant should be reused. Output:`n$($existing.Output)"
+        Assert-Match $existing.Output '\[REUSE\]' 'Reuse should explain that no duplicate start is needed'
+        Assert-Match $existing.ProcessLog '(?m)^http://127\.0\.0\.1:' 'Reuse should open the browser for the existing service'
+        Assert-NotMatch $existing.ProcessLog 'background-run\.(?:cmd|ps1)' 'Reuse must not submit another runner'
+    }
+
+    Invoke-Test 'DSH-identified occupant with dead HTTP is reported UNHEALTHY and not reused' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        try {
+            $deadPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+            $unhealthy = Invoke-StartScenario -Scenario OccupiedUnhealthy -ScenarioName 'dsh-occupied-unhealthy' -Port $deadPort
+        } finally {
+            $listener.Stop()
+        }
+
+        Assert-Equal 1 $unhealthy.ExitCode "An unhealthy DSH occupant must not be reported as success. Output:`n$($unhealthy.Output)"
+        Assert-Match $unhealthy.Output 'UNHEALTHY' 'The failure must name the UNHEALTHY state'
+        Assert-NotMatch $unhealthy.ProcessLog '(?m)^http://127\.0\.0\.1:' 'An unhealthy occupant must not open a browser'
+        Assert-NotMatch $unhealthy.ProcessLog 'background-run\.(?:cmd|ps1)' 'An unhealthy occupant must not submit another runner'
+    }
+
     Invoke-Test 'a live startup lock owns browser opening when its port is already listening' {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $listener.Start()
@@ -685,10 +733,59 @@ try {
         Assert-NotMatch $result.Output 'uninstall\.ps1' 'must not dispatch to the uninstaller'
     }
 
-    Invoke-Test '--full with --uninstall still dispatches to the uninstaller' {
+    Invoke-Test '--full with --uninstall reaches the transactional full uninstaller' {
         $result = Invoke-DeepseekCommand -Argument '--uninstall --full'
         Assert-Equal 0 $result.ExitCode '--uninstall --full should dispatch normally'
-        Assert-Match $result.Output 'uninstall\.ps1' 'should invoke the full uninstaller'
+        Assert-Match $result.ProcessLog 'uninstall\.ps1.*(?:^|\s)-Full(?:\s|$)' 'Full uninstall must pass -Full to PowerShell'
+    }
+
+    Invoke-Test 'numeric CLI tokens are valid only as the single --logs count' {
+        foreach ($argument in @('20', '--status 20', '20 --logs', '--logs 20 30')) {
+            $result = Invoke-DeepseekCommand -Argument $argument
+            Assert-Equal 1 $result.ExitCode "Invalid numeric placement must fail: $argument"
+            Assert-Match $result.Output 'Unknown argument|Invalid.*logs|Usage:' 'The error must be actionable'
+            Assert-NotMatch $result.ProcessLog 'run-dsh\.ps1|dsh-launch-state\.ps1' 'Invalid input must not dispatch'
+        }
+    }
+
+    Invoke-Test '--logs accepts one numeric count' {
+        $result = Invoke-DeepseekCommand -Argument '--logs 50'
+        Assert-Equal 0 $result.ExitCode '--logs 50 should dispatch normally'
+        Assert-Match $result.ProcessLog '-Tail 50(?:\s|$)' 'The requested log count must reach PowerShell'
+    }
+
+    Invoke-Test 'conflicting actions are rejected without dispatching either' {
+        $result = Invoke-DeepseekCommand -Argument '--stop --status'
+        Assert-Equal 1 $result.ExitCode 'conflicting actions should exit with code 1'
+        Assert-Match $result.Output 'Conflicting actions' 'should name the conflict'
+        Assert-Match $result.Output 'Usage:' 'should print the help block'
+        Assert-NotMatch $result.ProcessLog 'stop-dsh\.ps1' 'must not dispatch the stop action'
+        Assert-NotMatch $result.ProcessLog 'dsh-launch-state\.ps1' 'must not dispatch the status action'
+    }
+
+    Invoke-Test 'every PowerShell-backed CLI action preserves its child exit code' {
+        $cases = @(
+            [pscustomobject]@{ Argument = '-b'; ExpectedLog = 'start-background\.ps1' },
+            [pscustomobject]@{ Argument = '--stop'; ExpectedLog = 'stop-dsh\.ps1' },
+            [pscustomobject]@{ Argument = '--status'; ExpectedLog = 'dsh-launch-state\.ps1' },
+            [pscustomobject]@{ Argument = '--logs 50'; ExpectedLog = '-Tail 50(?:\s|$)' },
+            [pscustomobject]@{ Argument = '--upgrade'; ExpectedLog = 'upgrade-dsh\.ps1' },
+            [pscustomobject]@{ Argument = '--update'; ExpectedLog = 'update-check\.ps1' },
+            [pscustomobject]@{ Argument = '--version'; ExpectedLog = 'dsh-version\.ps1' },
+            [pscustomobject]@{ Argument = '--uninstall'; ExpectedLog = 'uninstall\.ps1' },
+            [pscustomobject]@{ Argument = ''; ExpectedLog = 'run-dsh\.ps1' }
+        )
+
+        foreach ($case in $cases) {
+            $result = Invoke-DeepseekCommand -Argument $case.Argument -PowerShellExitCode 7
+            Assert-Equal 7 $result.ExitCode "The child exit code must propagate: $($case.Argument). Output: $($result.Output)"
+            Assert-Match $result.ProcessLog $case.ExpectedLog "The action must dispatch before returning its code: $($case.Argument)"
+        }
+    }
+
+    Invoke-Test 'internal --check succeeds after its checks complete' {
+        $result = Invoke-DeepseekCommand -Argument '--check' -PowerShellExitCode 7
+        Assert-Equal 0 $result.ExitCode '--check must not inherit a PowerShell exit code because it completes internally'
     }
 
     Invoke-Test 'shortcut wait mode leaves browser opening to the runner monitor' {

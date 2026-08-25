@@ -26,7 +26,7 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 dsh-launcher 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的启动器，
 只需先安装 Node.js；首次运行 `deepseek` 时，启动器会通过 npm 在 `%USERPROFILE%\dsh-launch\runtime` 准备并启动 DSH 本体。
 
-1. 安装 [Node.js](https://nodejs.org) LTS
+1. 安装 [Node.js](https://nodejs.org) LTS（要求 `^22.19.0 || >=24.0.0`；22 LTS 或 24+ 均可；启动器在安装、启动和升级前会统一检查并提示当前版本与升级方式）
 
 > 首次启动需要联网。Node.js 通常自带 npm；若环境自检提示未检测到 npm，请重新安装 Node.js LTS。
 
@@ -102,20 +102,22 @@ cd dsh-launcher
 | --- | --- |
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：提交后立即返回，服务继续运行并在就绪后自动打开浏览器 |
-| `deepseek --status` | 查看服务状态（`RUNNING (ready)` / `RUNNING (starting)` / `STARTING` / `FAILED` / `NOT RUNNING`）；启动下载期间会显示 `STARTING`，失败时提示日志路径 |
+| `deepseek --status` | 查看服务状态（`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`）；启动下载期间显示 `STARTING`，失败时提示日志路径 |
 | `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令 |
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
 | `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
-| `deepseek --upgrade` | 一键升级：停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 准备最新版运行时 → 重新后台启动 |
+| `deepseek --upgrade` | 一键升级：解析并校验目标版本（失败则中止且不停止服务）→ 停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动 |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
-| `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认） |
+| `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认；先停止服务，目录先备份后删除，删除失败时保留备份并提示位置） |
 | `deepseek --check` | 环境自检（脚本路径 / npm / 端口） |
 | `deepseek --help` | 查看帮助 |
 
 - 普通启动优先复用已经准备并校验过的本地 DSH 版本；存在可用本地运行时时不访问 npm。仅在没有可用运行时的首次启动或修复场景中准备依赖。使用 `deepseek --update` 从 npm 检查新版本，使用 `deepseek --upgrade` 安装并切换到新版本。
 - `deepseek --update` / `deepseek --upgrade` 默认直接查询 npm 公共 registry 的 dist-tags（比 `npm view` 更快）。如需使用镜像或私有 registry，可设置环境变量 `DSH_REGISTRY`（例如 `https://registry.npmmirror.com`）；该设置仅在查询远端发布版本时生效，不影响本地运行时启动。
-- `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则升级到最新版，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。
+- `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则升级到最新版，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。目标版本无法解析或格式非法时，升级会在停止服务之前直接中止，不会影响当前安装。
+- 每次调用只允许一个动作（`--help`、`--status`、`--stop`、`-b` 等互斥）；出现多个动作时报错退出。`--full` 只能与 `--uninstall` 组合使用，并会传给事务式完整卸载流程；数字只允许紧跟在 `--logs` 后作为唯一的行数。PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。
+- Node.js 版本要求为 `^22.19.0 || >=24.0.0`（与上游一致）：安装、启动和升级三处共用同一版本检查，版本过低或未安装时会给出当前版本、要求版本和升级方式后直接失败，不会进入运行时准备流程。
 
 ## 其他启动方式
 
@@ -148,6 +150,8 @@ cd dsh-launcher
 - **启动时卡在下载 / 报网络错误**：换国内镜像后重试 `npm config set registry https://registry.npmmirror.com`
 - **`deepseek --status` 显示 `STARTING`**：表示 DSH 正在下载或启动，使用 `deepseek --logs 50` 查看实时错误；再次运行 `deepseek -b` 不会重复提交启动任务
 - **`deepseek --status` 显示 `FAILED`**：DSH 在监听端口前退出，运行 `deepseek --logs 50` 查看具体错误后重试 `deepseek -b`
+- **`deepseek --status` 显示 `UNHEALTHY`**：端口 3080 有 DSH 进程在监听但 HTTP 无响应（可能已卡死）；运行 `deepseek --stop` 后重新启动
+- **`deepseek --status` 显示 `FOREIGN_PORT`**：端口 3080 被其他非 DeepSeek Harness 进程占用；启动前请先排查并释放该端口（启动器和停止逻辑都不会误杀陌生进程）
 - **提示端口 3080 被占用（EADDRINUSE）**：说明已有一个实例在运行，用 `deepseek --status` 确认，或先 `deepseek --stop` 再启动
 - **关闭前台窗口后服务就停了**：设计行为（进程寄宿在控制台窗口）；需要常驻请用 `deepseek -b`
 - **想迁移已配置好的 DSH 设置（含 API Key）**：复制 `%USERPROFILE%\.dsh` 整个文件夹到新电脑的 `C:\Users\<用户名>\.dsh`（含敏感凭据，请勿公开）
