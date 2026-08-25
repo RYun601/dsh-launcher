@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'Staged')]
+    [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy', 'Staged')]
     [string]$Scenario,
 
     [Parameter(Mandatory = $true)]
@@ -58,10 +58,31 @@ function global:Get-NetTCPConnection {
         [Text.Encoding]::UTF8
     )
     if ($global:DshTestPortChecks -eq 1 -or $global:DshTestScenario -eq 'Failed') {
+        if ($global:DshTestScenario -in @('OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')) {
+            return [pscustomobject]@{ OwningProcess = 4242 }
+        }
         return $null
     }
 
     return [pscustomobject]@{ OwningProcess = 4242 }
+}
+
+function global:Get-CimInstance {
+    param(
+        [string]$ClassName,
+        [string]$Filter
+    )
+
+    $identityScenario = $global:DshTestScenario -in @('OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')
+    if (-not $identityScenario) {
+        return CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $Filter
+    }
+    $commandLine = switch ($global:DshTestScenario) {
+        'OccupiedForeign'   { 'C:\apps\other-server.exe --serve' }
+        'OccupiedReady'     { 'C:\node\node.exe C:\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js web' }
+        'OccupiedUnhealthy' { 'C:\node\node.exe C:\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js web' }
+    }
+    return [pscustomobject]@{ CommandLine = $commandLine }
 }
 
 function global:Start-Process {
@@ -134,7 +155,7 @@ function global:Invoke-WebRequest {
         return [pscustomobject]@{ StatusCode = 200 }
     }
 
-    if ($global:DshTestScenario -in @('Ready', 'DuplicateReady')) {
+    if ($global:DshTestScenario -in @('Ready', 'DuplicateReady', 'OccupiedReady')) {
         return [pscustomobject]@{ StatusCode = 200 }
     }
 
@@ -175,6 +196,18 @@ if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
     $lockDirectory = Join-Path $ProfilePath 'dsh-launch\dsh-startup.lock'
     New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
     Set-Content -LiteralPath (Join-Path $lockDirectory 'pid.txt') -Value $PID -Encoding ASCII
+    [IO.File]::WriteAllText(
+        (Join-Path $lockDirectory 'command-path.txt'),
+        (Join-Path $PSHOME 'powershell.exe'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $lockDirectory 'script-path.txt'),
+        [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-Content -LiteralPath (Join-Path $lockDirectory 'created-at.txt') `
+        -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
 }
 
 $listener = $null
@@ -182,6 +215,18 @@ if ($Scenario -eq 'OccupiedDuplicate') {
     $lockDirectory = Join-Path $ProfilePath 'dsh-launch\dsh-startup.lock'
     New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
     Set-Content -LiteralPath (Join-Path $lockDirectory 'pid.txt') -Value $PID -Encoding ASCII
+    [IO.File]::WriteAllText(
+        (Join-Path $lockDirectory 'command-path.txt'),
+        (Join-Path $PSHOME 'powershell.exe'),
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $lockDirectory 'script-path.txt'),
+        [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path),
+        [Text.UTF8Encoding]::new($false)
+    )
+    Set-Content -LiteralPath (Join-Path $lockDirectory 'created-at.txt') `
+        -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
     $listener.Start()
 }
@@ -196,7 +241,7 @@ if ($Scenario -eq 'DuplicateFailed') {
 }
 
 try {
-    if ($Scenario -in @('Immediate', 'Duplicate', 'OccupiedDuplicate')) {
+    if ($Scenario -in @('Immediate', 'Duplicate', 'OccupiedDuplicate', 'OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')) {
         & $ScriptPath -TimeoutSeconds $TimeoutSeconds -Port $Port
     } else {
         & $ScriptPath -WaitForReady -TimeoutSeconds $TimeoutSeconds -Port $Port -HeartbeatSeconds $HeartbeatSeconds

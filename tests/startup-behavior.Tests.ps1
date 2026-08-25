@@ -287,13 +287,15 @@ function Invoke-ReservedRealBackgroundRunner {
         [Text.Encoding]::ASCII
     )
 
+    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $runnerScript = Join-Path $repoRoot 'background-run.ps1'
+    $currentTestScript = [IO.Path]::GetFullPath($MyInvocation.ScriptName)
     $reservation = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'dsh-launch-state.ps1') `
-        -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $PID -StartupToken $startupToken 2>&1
+        -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $PID -StartupToken $startupToken `
+        -CommandPath $systemPowerShell -ScriptPath $currentTestScript 2>&1
     Assert-Equal 0 $LASTEXITCODE "The test coordinator should reserve the startup lock. Output:`n$($reservation -join [Environment]::NewLine)"
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $runnerScript = Join-Path $repoRoot 'background-run.ps1'
     $runnerArguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', "`"$runnerScript`"",
@@ -328,7 +330,8 @@ function Invoke-ReservedRealBackgroundRunner {
     $process = [Diagnostics.Process]::Start($startInfo)
     $transfer = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'dsh-launch-state.ps1') `
         -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $process.Id `
-        -StartupToken $startupToken -TransferOwnership 2>&1
+        -StartupToken $startupToken -CommandPath $systemPowerShell -ScriptPath $runnerScript `
+        -TransferOwnership 2>&1
     Assert-Equal 0 $LASTEXITCODE "The coordinator should transfer ownership to the real runner. Output:`n$($transfer -join [Environment]::NewLine)"
     [IO.File]::WriteAllText($gatePath, 'GO', [Text.Encoding]::ASCII)
 
