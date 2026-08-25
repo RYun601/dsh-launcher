@@ -33,6 +33,7 @@ function New-UpgradeFixture {
 
     Copy-Item -LiteralPath $upgradeScript -Destination (Join-Path $Root 'upgrade-dsh.ps1')
     Copy-Item -LiteralPath $versionHelper -Destination (Join-Path $Root 'dsh-version.ps1')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-node-version.ps1') -Destination (Join-Path $Root 'dsh-node-version.ps1')
     [IO.File]::WriteAllText(
         (Join-Path $Root 'resolve-dsh-version.ps1'),
         "Write-Output '$ResolvedVersion'`r`n",
@@ -40,7 +41,7 @@ function New-UpgradeFixture {
     )
     [IO.File]::WriteAllText(
         (Join-Path $Root 'stop-dsh.ps1'),
-        "exit 0`r`n",
+        "[IO.File]::WriteAllText(`$env:DSH_TEST_STOP_MARKER, 'STOPPED', [Text.Encoding]::ASCII)`r`nexit 0`r`n",
         [Text.Encoding]::ASCII
     )
     [IO.File]::WriteAllText(
@@ -70,6 +71,11 @@ exit 0
         "@echo off`r`necho %*>>`"%DSH_TEST_NPM_LOG%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
+    [IO.File]::WriteAllText(
+        (Join-Path $fakeBin 'node.cmd'),
+        "@echo off`r`nif defined DSH_TEST_NODE_VERSION (echo %DSH_TEST_NODE_VERSION%) else (echo v22.19.0)`r`nexit /b 0`r`n",
+        [Text.Encoding]::ASCII
+    )
 
     if ($GlobalDshVersion) {
         $globalPkgDir = Join-Path $appData 'npm\node_modules\@deepseek-ai\dsh'
@@ -88,23 +94,31 @@ exit 0
         LocalAppData  = $localAppData
         StartLog      = $startLog
         NpmLog        = $NpmLog
+        StopMarker    = Join-Path $Root 'stop.log'
     }
 }
 
 function Invoke-UpgradeFixture {
-    param([pscustomobject]$Fixture)
+    param(
+        [pscustomobject]$Fixture,
+        [string]$NodeVersion = ''
+    )
 
     $previousPath = $env:PATH
     $previousAppData = $env:APPDATA
     $previousLocalAppData = $env:LOCALAPPDATA
     $previousUpgradeLog = $env:DSH_TEST_UPGRADE_LOG
     $previousNpmLog = $env:DSH_TEST_NPM_LOG
+    $previousStopMarker = $env:DSH_TEST_STOP_MARKER
+    $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
     try {
         $env:PATH = "$($Fixture.FakeBin);$previousPath"
         $env:APPDATA = $Fixture.AppData
         $env:LOCALAPPDATA = $Fixture.LocalAppData
         $env:DSH_TEST_UPGRADE_LOG = $Fixture.StartLog
         $env:DSH_TEST_NPM_LOG = $Fixture.NpmLog
+        $env:DSH_TEST_STOP_MARKER = $Fixture.StopMarker
+        $env:DSH_TEST_NODE_VERSION = $NodeVersion
         $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
             -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
         return [pscustomobject]@{
@@ -117,6 +131,8 @@ function Invoke-UpgradeFixture {
         $env:LOCALAPPDATA = $previousLocalAppData
         $env:DSH_TEST_UPGRADE_LOG = $previousUpgradeLog
         $env:DSH_TEST_NPM_LOG = $previousNpmLog
+        $env:DSH_TEST_STOP_MARKER = $previousStopMarker
+        $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
     }
 }
 
@@ -231,6 +247,17 @@ try {
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
     }
 
+    Invoke-Test 'explicit upgrade fails fast when the local Node.js does not meet the requirement' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-old-node') `
+            -NpmLog (Join-Path $testRoot 'upgrade-old-node-npm.log')
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture -NodeVersion 'v18.19.0'
+
+        Assert-Equal 1 $result.ExitCode "An unsupported Node.js must abort the upgrade. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'v18\.19\.0' 'The error must report the current Node.js version'
+        Assert-Match $result.Output '\^22\.19\.0' 'The error must state the required version range'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'The upgrade must not stop the service on an unsupported Node.js'
+    }
     Write-Host "All $script:Passed upgrade cache behavior tests passed."
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

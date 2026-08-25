@@ -39,7 +39,8 @@ function Invoke-Runtime {
         [string]$SelectedRuntimeRoot = $runtimeRoot,
         [string]$PeerMode = '',
         [switch]$TrackPeerScans,
-        [switch]$NoOpen
+        [switch]$NoOpen,
+        [string]$NodeVersion = ''
     )
 
     $previousPath = $env:PATH
@@ -48,6 +49,7 @@ function Invoke-Runtime {
     $previousUserProfile = $env:USERPROFILE
     $previousPeerMode = $env:DSH_TEST_PEER_MODE
     $previousPeerScanLog = $env:DSH_TEST_PEER_SCAN_LOG
+    $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $env:PATH = "$fakeBin;$previousPath"
@@ -56,6 +58,7 @@ function Invoke-Runtime {
         $env:USERPROFILE = $profileRoot
         $env:DSH_TEST_PEER_MODE = $PeerMode
         $env:DSH_TEST_PEER_SCAN_LOG = $peerScanLog
+        $env:DSH_TEST_NODE_VERSION = $NodeVersion
         $ErrorActionPreference = 'Continue'
         $scriptPath = if ($TrackPeerScans) { $runtimeHarness } else { $runtimeScript }
         $scriptArguments = if ($TrackPeerScans) {
@@ -76,6 +79,7 @@ function Invoke-Runtime {
         $env:USERPROFILE = $previousUserProfile
         $env:DSH_TEST_PEER_MODE = $previousPeerMode
         $env:DSH_TEST_PEER_SCAN_LOG = $previousPeerScanLog
+        $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
         $ErrorActionPreference = $previousErrorActionPreference
     }
 }
@@ -218,7 +222,7 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`necho %*>>`"%DSH_TEST_NODE_LOG%`"`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
+        "@echo off`r`nif not `"%1`"==`"--version`" echo %*>>`"%DSH_TEST_NODE_LOG%`"`r`nif defined DSH_TEST_NODE_VERSION if `"%DSH_TEST_NODE_VERSION%`"==`"NONE`" exit /b 0`r`nif defined DSH_TEST_NODE_VERSION echo %DSH_TEST_NODE_VERSION%`r`nif not defined DSH_TEST_NODE_VERSION echo v22.19.0`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
@@ -341,3 +345,23 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
 }
 
 exit 0
+    Invoke-Test 'rejects unsupported Node versions before preparing the runtime' {
+        $npmLogStart = if (Test-Path -LiteralPath $npmLog) { (Get-Item -LiteralPath $npmLog).Length } else { 0 }
+        $rejectedRoot = Join-Path $profileRoot 'dsh-launch\runtime-node-rejected'
+
+        $missing = Invoke-Runtime -SelectedRuntimeRoot $rejectedRoot -NodeVersion 'NONE'
+        Assert-Equal 1 $missing.ExitCode 'A missing Node.js must fail runtime preparation'
+        Assert-Match $missing.Output 'nodejs\.org' 'A missing Node.js error should point at the download page'
+        Assert-Match $missing.Output '\^22\.19\.0' 'A missing Node.js error must state the required version range'
+
+        $old = Invoke-Runtime -SelectedRuntimeRoot $rejectedRoot -NodeVersion 'v18.19.0'
+        Assert-Equal 1 $old.ExitCode 'An unsupported Node.js version must fail runtime preparation'
+        Assert-Match $old.Output 'v18\.19\.0' 'The error must report the current Node.js version'
+        Assert-Match $old.Output '\^22\.19\.0 \|\| >=24' 'The error must state the required version range'
+        Assert-Match $old.Output '(?i)nvm|nodejs\.org' 'The error must suggest an upgrade path'
+
+        $npmCallsAfter = if (Test-Path -LiteralPath $npmLog) { [IO.File]::ReadAllText($npmLog) } else { '' }
+        Assert-Equal $npmLogStart ([int]$npmCallsAfter.Length) 'A rejected Node.js environment must not reach npm at all'
+        Assert-Equal $false (Test-Path -LiteralPath (Join-Path $rejectedRoot 'dsh-runtime-ready.json')) `
+            'A rejected Node.js environment must not mark any runtime ready'
+    }
