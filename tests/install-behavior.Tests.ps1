@@ -41,6 +41,42 @@ function Invoke-Ps51Parse {
     return @($errors)
 }
 
+if (-not ('DshInstallerTestPathNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class DshInstallerTestPathNative
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetLongPathName(string path, StringBuilder buffer, uint capacity);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetShortPathName(string path, StringBuilder buffer, uint capacity);
+}
+'@
+}
+
+function ConvertTo-TestLongPath {
+    param([string]$Path)
+
+    $buffer = New-Object Text.StringBuilder 32768
+    $length = [DshInstallerTestPathNative]::GetLongPathName($Path, $buffer, [uint32]$buffer.Capacity)
+    if ($length -eq 0 -or $length -ge $buffer.Capacity) {
+        throw "GetLongPathName failed for test fixture: $Path"
+    }
+    return $buffer.ToString()
+}
+
+function Get-TestShortPath {
+    param([string]$Path)
+
+    $buffer = New-Object Text.StringBuilder 32768
+    $length = [DshInstallerTestPathNative]::GetShortPathName($Path, $buffer, [uint32]$buffer.Capacity)
+    if ($length -eq 0 -or $length -ge $buffer.Capacity) { return '' }
+    return $buffer.ToString()
+}
+
 function Invoke-Test {
     param([string]$Name, [scriptblock]$Body)
     & $Body
@@ -77,6 +113,43 @@ function Invoke-Installer {
         $env:PATH = $previousPath
         $env:DSH_TEST_MODE = $previousTestMode
         $env:DSH_TEST_INSTALL_ARCHIVE = $previousArchive
+        $env:USERPROFILE = $previousProfile
+        $env:TEMP = $previousTemp
+        $env:DSH_TEST_NODE_LOG = $previousNodeLog
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+}
+
+function Invoke-InstallerPathResolution {
+    param([string]$Path)
+
+    $previousPath = $env:PATH
+    $previousTestMode = $env:DSH_TEST_MODE
+    $previousArchive = $env:DSH_TEST_INSTALL_ARCHIVE
+    $previousResolvePath = $env:DSH_TEST_RESOLVE_PATH
+    $previousProfile = $env:USERPROFILE
+    $previousTemp = $env:TEMP
+    $previousNodeLog = $env:DSH_TEST_NODE_LOG
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $env:PATH = "$fakeBin;$previousPath"
+        $env:DSH_TEST_MODE = '1'
+        $env:DSH_TEST_INSTALL_ARCHIVE = $archivePath
+        $env:DSH_TEST_RESOLVE_PATH = $Path
+        $env:USERPROFILE = $profileRoot
+        $env:TEMP = $tempRoot
+        $env:DSH_TEST_NODE_LOG = $nodeLog
+        $ErrorActionPreference = 'Continue'
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer -SkipPath 2>&1
+        return [pscustomobject]@{
+            ExitCode = $LASTEXITCODE
+            Output = [string]($output -join [Environment]::NewLine)
+        }
+    } finally {
+        $env:PATH = $previousPath
+        $env:DSH_TEST_MODE = $previousTestMode
+        $env:DSH_TEST_INSTALL_ARCHIVE = $previousArchive
+        $env:DSH_TEST_RESOLVE_PATH = $previousResolvePath
         $env:USERPROFILE = $previousProfile
         $env:TEMP = $previousTemp
         $env:DSH_TEST_NODE_LOG = $previousNodeLog
@@ -163,6 +236,38 @@ try {
         New-Item -ItemType Directory -Force -Path $configRoot | Out-Null
         New-Item -ItemType Junction -Path $junction -Target $configRoot | Out-Null
         Assert-RejectedInstallTarget -Target (Join-Path $junction 'blocked') -Name '.dsh junction target'
+    }
+
+    Invoke-Test 'installer resolves an existing protected fixture to its long path' {
+        $protectedRoot = Join-Path $profileRoot 'dsh-launch'
+        New-Item -ItemType Directory -Force -Path $protectedRoot | Out-Null
+        $expected = ConvertTo-TestLongPath -Path $protectedRoot
+        $result = Invoke-InstallerPathResolution -Path $protectedRoot
+        Assert-Equal 0 $result.ExitCode "Path-resolution test mode should succeed. Output:`n$($result.Output)"
+        Assert-Equal $expected $result.Output.Trim() 'Path-resolution test mode must return the long fixture path'
+    }
+
+    Invoke-Test 'installer rejects actual 8.3 protected-directory aliases when available' {
+        $shortAliasCount = 0
+        foreach ($protectedName in @('.dsh', 'dsh-launch')) {
+            $protectedRoot = Join-Path $profileRoot $protectedName
+            New-Item -ItemType Directory -Force -Path $protectedRoot | Out-Null
+            Assert-PathEqual $protectedRoot (ConvertTo-TestLongPath -Path $protectedRoot) `
+                "Long-path fixture must resolve $protectedName"
+            $shortRoot = Get-TestShortPath -Path $protectedRoot
+            $shortProtectedName = Split-Path -Leaf $shortRoot
+            if ([string]::IsNullOrWhiteSpace($shortRoot) -or
+                [string]::Equals($shortProtectedName, $protectedName, [StringComparison]::OrdinalIgnoreCase)) {
+                Write-Host "SKIP: no distinct 8.3 alias for $protectedName on this volume"
+                continue
+            }
+            $shortAliasCount++
+            $shortProtectedRoot = Join-Path $profileRoot $shortProtectedName
+            Assert-RejectedInstallTarget -Target (Join-Path $shortProtectedRoot 'blocked') -Name "$protectedName 8.3 alias target"
+        }
+        if ($shortAliasCount -eq 0) {
+            Write-Host 'SKIP: volume does not expose 8.3 aliases; GetLongPathName fixture was still exercised'
+        }
     }
 
     Write-Host "All $script:Passed installer behavior tests passed."

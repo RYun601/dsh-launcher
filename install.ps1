@@ -16,6 +16,53 @@ function Test-DshChildPath {
     return $candidateFull.StartsWith($parentFull + '\', [StringComparison]::OrdinalIgnoreCase)
 }
 
+if (-not ('DshInstallerPathNative' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class DshInstallerPathNative
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetLongPathName(string path, StringBuilder buffer, uint capacity);
+}
+'@
+}
+
+function ConvertTo-DshLongPath {
+    param([string]$Path)
+
+    $buffer = New-Object Text.StringBuilder 32768
+    $length = [DshInstallerPathNative]::GetLongPathName($Path, $buffer, [uint32]$buffer.Capacity)
+    if ($length -eq 0 -or $length -ge $buffer.Capacity) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u65e0\u6cd5\u89e3\u6790\u5b89\u88c5\u8def\u5f84')
+    }
+    return $buffer.ToString()
+}
+
+function Resolve-DshPathForComparison {
+    param([string]$Path)
+
+    $existing = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $missingParts = New-Object Collections.Generic.List[string]
+    while (-not (Test-Path -LiteralPath $existing)) {
+        $leaf = Split-Path -Leaf $existing
+        $parent = Split-Path -Parent $existing
+        if ([string]::IsNullOrWhiteSpace($leaf) -or [string]::IsNullOrWhiteSpace($parent) -or
+            [string]::Equals($parent, $existing, [StringComparison]::OrdinalIgnoreCase)) {
+            throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u65e0\u6cd5\u89e3\u6790\u5b89\u88c5\u8def\u5f84')
+        }
+        $missingParts.Insert(0, $leaf)
+        $existing = $parent
+    }
+
+    $resolved = ConvertTo-DshLongPath -Path $existing
+    foreach ($missingPart in $missingParts) {
+        $resolved = Join-Path $resolved $missingPart
+    }
+    return [IO.Path]::GetFullPath($resolved).TrimEnd('\')
+}
+
 function Test-DshPathHasReparsePoint {
     param([string]$Parent, [string]$Candidate)
 
@@ -58,25 +105,35 @@ try {
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
+if ($env:DSH_TEST_MODE -eq '1' -and -not [string]::IsNullOrWhiteSpace($env:DSH_TEST_RESOLVE_PATH)) {
+    Write-Output (Resolve-DshPathForComparison -Path $env:DSH_TEST_RESOLVE_PATH)
+    exit 0
+}
+
 if ([string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
     throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1aUSERPROFILE \u4e0d\u53ef\u7528')
 }
 
-$profileFull = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
-$installFull = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
-$installDriveRoot = [IO.Path]::GetPathRoot($installFull).TrimEnd('\')
-$dshConfigRoot = Join-Path $profileFull '.dsh'
-$launchDataRoot = Join-Path $profileFull 'dsh-launch'
+$profileInput = [IO.Path]::GetFullPath($env:USERPROFILE).TrimEnd('\')
+$installInput = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+$installDriveRoot = [IO.Path]::GetPathRoot($installInput).TrimEnd('\')
 
-if ($installFull -eq $installDriveRoot) {
+if ($installInput -eq $installDriveRoot) {
     throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u8def\u5f84\u4e0d\u80fd\u662f\u9a71\u52a8\u5668\u6839\u76ee\u5f55')
 }
+if (-not (Test-DshChildPath -Parent $profileInput -Candidate $installInput)) {
+    throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u8def\u5f84\u5fc5\u987b\u4f4d\u4e8e USERPROFILE \u4e4b\u4e0b')
+}
+if (Test-DshPathHasReparsePoint -Parent $profileInput -Candidate $installInput) {
+    throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u8def\u5f84\u4e0d\u80fd\u7ecf\u8fc7\u91cd\u89e3\u6790\u70b9')
+}
+$profileFull = Resolve-DshPathForComparison -Path $profileInput
+$installFull = Resolve-DshPathForComparison -Path $installInput
 if (-not (Test-DshChildPath -Parent $profileFull -Candidate $installFull)) {
     throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u8def\u5f84\u5fc5\u987b\u4f4d\u4e8e USERPROFILE \u4e4b\u4e0b')
 }
-if (Test-DshPathHasReparsePoint -Parent $profileFull -Candidate $installFull) {
-    throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u8def\u5f84\u4e0d\u80fd\u7ecf\u8fc7\u91cd\u89e3\u6790\u70b9')
-}
+$dshConfigRoot = Join-Path $profileFull '.dsh'
+$launchDataRoot = Join-Path $profileFull 'dsh-launch'
 if ($installFull -eq $dshConfigRoot -or (Test-DshChildPath -Parent $dshConfigRoot -Candidate $installFull)) {
     throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u4e0d\u80fd\u5199\u5165 .dsh \u914d\u7f6e\u76ee\u5f55')
 }
