@@ -19,6 +19,7 @@ $requiredRuntimeFiles = @(
     'background-run.ps1',
     'start-background.ps1',
     'dsh-launch-state.ps1',
+    'dsh-service-health.ps1',
     'dsh-node-version.ps1',
     'run-dsh.ps1',
     'resolve-dsh-version.ps1',

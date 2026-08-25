@@ -3,6 +3,7 @@ background-run.ps1
 deepseek.cmd
 deepseek.ico
 dsh-launch-state.ps1
+dsh-service-health.ps1
 dsh-node-version.ps1
 dsh-version.ps1
 install-command.cmd
