@@ -286,12 +286,50 @@ function Write-StartupLockMetadata {
         CreatedAt = $createdAt
     }
     $temporaryIdentityPath = Join-Path $Paths.Lock ('identity-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $backupIdentityPath = Join-Path $Paths.Lock ('identity-backup-' + [guid]::NewGuid().ToString('N') + '.tmp')
     [IO.File]::WriteAllText(
         $temporaryIdentityPath,
         ($identity | ConvertTo-Json -Depth 3),
         [Text.UTF8Encoding]::new($false)
     )
-    Move-Item -LiteralPath $temporaryIdentityPath -Destination $Paths.LockIdentity -Force
+    try {
+        if (Test-Path -LiteralPath $Paths.LockIdentity) {
+            $signalPath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL
+            $continuePath = $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE
+            if ($signalPath -and $continuePath -and -not (Test-Path -LiteralPath $signalPath)) {
+                [IO.File]::WriteAllText($signalPath, 'ready', [Text.Encoding]::ASCII)
+                $deadline = [DateTime]::UtcNow.AddSeconds(15)
+                while (-not (Test-Path -LiteralPath $continuePath)) {
+                    if ([DateTime]::UtcNow -ge $deadline) {
+                        throw 'Timed out waiting for the identity replacement test hook'
+                    }
+                    Start-Sleep -Milliseconds 25
+                }
+            }
+            if ($env:DSH_TEST_IDENTITY_REPLACE_FAILURE -eq '1') {
+                throw 'Injected identity replacement failure'
+            }
+            try {
+                [IO.File]::Replace($temporaryIdentityPath, $Paths.LockIdentity, $backupIdentityPath)
+            } catch {
+                if (-not (Test-Path -LiteralPath $Paths.LockIdentity) -and
+                        (Test-Path -LiteralPath $backupIdentityPath)) {
+                    [IO.File]::Move($backupIdentityPath, $Paths.LockIdentity)
+                }
+                throw
+            }
+        } else {
+            [IO.File]::Move($temporaryIdentityPath, $Paths.LockIdentity)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryIdentityPath) {
+            Remove-Item -LiteralPath $temporaryIdentityPath -Force -ErrorAction SilentlyContinue
+        }
+        if ((Test-Path -LiteralPath $Paths.LockIdentity) -and
+                (Test-Path -LiteralPath $backupIdentityPath)) {
+            Remove-Item -LiteralPath $backupIdentityPath -Force -ErrorAction SilentlyContinue
+        }
+    }
     if ($normalizedCommandPath) {
         [IO.File]::WriteAllText($Paths.LockCommandPath, $normalizedCommandPath, [Text.UTF8Encoding]::new($false))
     }
@@ -491,24 +529,17 @@ function Write-StartupStateFile {
     Move-Item -LiteralPath $temporaryPath -Destination $Paths.State -Force
 }
 
-function Write-Status {
-    param(
-        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
-        [int]$ServicePort = 3080
-    )
+function Get-StartupStatusSnapshot {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Paths)
 
-    $guard = Enter-StartupLockGuard -Paths $Paths
-    try {
+    $lock = Get-StartupLockInfo -Paths $Paths
+    $lockIsLive = $lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
+        -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)
+    if ($lock.Exists -and -not $lockIsLive) {
+        Remove-StaleStartupLock -Paths $Paths | Out-Null
         $lock = Get-StartupLockInfo -Paths $Paths
-        $lockIsLive = $lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-            -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)
-        if ($lock.Exists -and -not $lockIsLive) {
-            Remove-StaleStartupLock -Paths $Paths | Out-Null
-        }
-    } finally {
-        Exit-StartupLockGuard -Guard $guard
+        $lockIsLive = $false
     }
-
     $startupState = Read-StartupState -Paths $Paths
     $runnerPid = if ($startupState -and $startupState.RunnerPid) {
         [int]$startupState.RunnerPid
@@ -517,60 +548,100 @@ function Write-Status {
     } else {
         0
     }
-    $hasStartupEvidence = $startupState -and $startupState.Entrypoint -and
-        $startupState.StartupToken -and $runnerPid -gt 0
-    $startingLockMatchesState = $startupState -and $startupState.State -eq 'STARTING' -and
-        $lockIsLive -and $lock.OwnerPid -eq $runnerPid -and [string]::Equals(
-            [string]$lock.Token,
+
+    return [pscustomobject]@{
+        Lock = $lock
+        LockIsLive = $lockIsLive
+        StartupState = $startupState
+        RunnerPid = $runnerPid
+    }
+}
+
+function Test-StatusLockMatchesState {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Snapshot)
+
+    $startupState = $Snapshot.StartupState
+    return $startupState -and $startupState.State -eq 'STARTING' -and
+        $Snapshot.LockIsLive -and $Snapshot.Lock.OwnerPid -eq $Snapshot.RunnerPid -and
+        [string]::Equals(
+            [string]$Snapshot.Lock.Token,
             [string]$startupState.StartupToken,
             [StringComparison]::Ordinal)
-    if ($hasStartupEvidence -and ($startupState.State -eq 'READY' -or $startingLockMatchesState)) {
-        if ($startupState.State -eq 'READY') {
-            $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
-            if ($recordedServicePid -le 0) {
-                Write-Output 'UNHEALTHY (stored READY state has no service PID evidence)'
-                return
-            }
-            $classification = Get-DshServiceClassification -Port $ServicePort `
-                -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
-                -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                -RunnerPid $runnerPid
-            if ($classification.State -eq 'READY' -and
-                    [int]$classification.ServicePid -ne $recordedServicePid) {
-                Write-Output "UNHEALTHY - PID $($classification.ServicePid) (service identity changed)"
-                return
-            }
-        } else {
-            $classification = Wait-DshServiceIdentity -Port $ServicePort `
-                -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
-                -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                -RunnerPid $runnerPid -StableMilliseconds 250 -PollMilliseconds 50
-        }
+}
 
-        if ($classification.State -eq 'READY') {
-            if ($startupState.State -eq 'STARTING') {
-                Write-StartupStateFile -Paths $Paths -NewState 'READY' `
-                    -NewOwnerPid $runnerPid -NewServicePid ([int]$classification.ServicePid) `
-                    -NewVersion ([string]$startupState.Version) -NewMessage ([string]$classification.Message) `
-                    -NewExitCode 0 -NewStartupToken ([string]$startupState.StartupToken) `
-                    -NewRuntimeRoot ([string]$startupState.RuntimeRoot) `
-                    -NewEntrypoint ([string]$startupState.Entrypoint)
-            }
-            Write-Output "READY - PID $($classification.ServicePid)"
-            return
-        }
+function Test-StartupStatusSnapshotMatch {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Expected,
+        [Parameter(Mandatory = $true)][pscustomobject]$Actual
+    )
 
-        if ($startupState.State -eq 'READY' -or $classification.State -in @('FOREIGN_PORT', 'UNHEALTHY')) {
-            $pidSuffix = if ($classification.ServicePid) { " - PID $($classification.ServicePid)" } else { '' }
-            $messageSuffix = if ($classification.Message) { " ($($classification.Message))" } else { '' }
-            Write-Output "$($classification.State)$pidSuffix$messageSuffix"
-            return
-        }
+    if ($Expected.LockIsLive -ne $Actual.LockIsLive -or
+            $Expected.Lock.Exists -ne $Actual.Lock.Exists -or
+            $Expected.Lock.OwnerPid -ne $Actual.Lock.OwnerPid -or
+            -not [string]::Equals([string]$Expected.Lock.Token, [string]$Actual.Lock.Token, [StringComparison]::Ordinal) -or
+            -not [string]::Equals([string]$Expected.Lock.CommandPath, [string]$Actual.Lock.CommandPath, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals([string]$Expected.Lock.ScriptPath, [string]$Actual.Lock.ScriptPath, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
     }
 
-    if ($lockIsLive) {
-        $owner = $lock.OwnerPid
-        $versionSuffix = if ($startupState -and $startupState.Version) { " - version $($startupState.Version)" } else { '' }
+    if (($null -eq $Expected.StartupState) -ne ($null -eq $Actual.StartupState)) {
+        return $false
+    }
+    if (-not $Expected.StartupState) {
+        return $true
+    }
+
+    return [string]::Equals(
+            [string]$Expected.StartupState.State,
+            [string]$Actual.StartupState.State,
+            [StringComparison]::Ordinal) -and
+        $Expected.RunnerPid -eq $Actual.RunnerPid -and
+        [int]$Expected.StartupState.ServicePid -eq [int]$Actual.StartupState.ServicePid -and
+        [string]::Equals(
+            [string]$Expected.StartupState.StartupToken,
+            [string]$Actual.StartupState.StartupToken,
+            [StringComparison]::Ordinal) -and
+        [string]::Equals(
+            [string]$Expected.StartupState.Entrypoint,
+            [string]$Actual.StartupState.Entrypoint,
+            [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals(
+            [string]$Expected.StartupState.Version,
+            [string]$Actual.StartupState.Version,
+            [StringComparison]::Ordinal)
+}
+
+function Invoke-StatusAfterProbeTestHook {
+    $signalPath = $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL
+    $continuePath = $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE
+    if (-not $signalPath -or -not $continuePath -or (Test-Path -LiteralPath $signalPath)) {
+        return
+    }
+
+    [IO.File]::WriteAllText($signalPath, 'ready', [Text.Encoding]::ASCII)
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    while (-not (Test-Path -LiteralPath $continuePath)) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw 'Timed out waiting for the status probe test hook'
+        }
+        Start-Sleep -Milliseconds 25
+    }
+}
+
+function Write-StatusWithoutProbe {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [Parameter(Mandatory = $true)][pscustomobject]$Snapshot
+    )
+
+    $startupState = $Snapshot.StartupState
+    if ($Snapshot.LockIsLive) {
+        $owner = $Snapshot.Lock.OwnerPid
+        $versionSuffix = if ((Test-StatusLockMatchesState -Snapshot $Snapshot) -and $startupState.Version) {
+            " - version $($startupState.Version)"
+        } else {
+            ''
+        }
         Write-Output "STARTING - PID $owner$versionSuffix"
         return
     }
@@ -584,6 +655,100 @@ function Write-Status {
     }
 
     Write-Output 'STOPPED'
+}
+
+function Write-Status {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Paths,
+        [int]$ServicePort = 3080
+    )
+
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        $guard = Enter-StartupLockGuard -Paths $Paths
+        try {
+            $snapshot = Get-StartupStatusSnapshot -Paths $Paths
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
+        }
+
+        $startupState = $snapshot.StartupState
+        $runnerPid = $snapshot.RunnerPid
+        $classification = $null
+        $hasStartupEvidence = $startupState -and $startupState.Entrypoint -and
+            $startupState.StartupToken -and $runnerPid -gt 0
+        $startingLockMatchesState = Test-StatusLockMatchesState -Snapshot $snapshot
+        if ($hasStartupEvidence -and ($startupState.State -eq 'READY' -or $startingLockMatchesState)) {
+            if ($startupState.State -eq 'READY') {
+                $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
+                if ($recordedServicePid -gt 0) {
+                    $classification = Get-DshServiceClassification -Port $ServicePort `
+                        -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
+                        -ExpectedStartupToken ([string]$startupState.StartupToken) `
+                        -RunnerPid $runnerPid
+                }
+            } else {
+                $classification = Wait-DshServiceIdentity -Port $ServicePort `
+                    -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
+                    -ExpectedStartupToken ([string]$startupState.StartupToken) `
+                    -RunnerPid $runnerPid -StableMilliseconds 250 -PollMilliseconds 50
+            }
+        }
+
+        if ($classification) {
+            Invoke-StatusAfterProbeTestHook
+        }
+
+        $guard = Enter-StartupLockGuard -Paths $Paths
+        try {
+            $currentSnapshot = Get-StartupStatusSnapshot -Paths $Paths
+            if (-not (Test-StartupStatusSnapshotMatch -Expected $snapshot -Actual $currentSnapshot)) {
+                continue
+            }
+
+            if ($startupState -and $startupState.State -eq 'READY' -and
+                    (-not $startupState.ServicePid -or [int]$startupState.ServicePid -le 0)) {
+                Write-Output 'UNHEALTHY (stored READY state has no service PID evidence)'
+                return
+            }
+            if ($classification -and $startupState.State -eq 'READY' -and
+                    $classification.State -eq 'READY' -and
+                    [int]$classification.ServicePid -ne [int]$startupState.ServicePid) {
+                Write-Output "UNHEALTHY - PID $($classification.ServicePid) (service identity changed)"
+                return
+            }
+            if ($classification -and $classification.State -eq 'READY') {
+                if ($startupState.State -eq 'STARTING') {
+                    Write-StartupStateFile -Paths $Paths -NewState 'READY' `
+                        -NewOwnerPid $runnerPid -NewServicePid ([int]$classification.ServicePid) `
+                        -NewVersion ([string]$startupState.Version) -NewMessage ([string]$classification.Message) `
+                        -NewExitCode 0 -NewStartupToken ([string]$startupState.StartupToken) `
+                        -NewRuntimeRoot ([string]$startupState.RuntimeRoot) `
+                        -NewEntrypoint ([string]$startupState.Entrypoint)
+                }
+                Write-Output "READY - PID $($classification.ServicePid)"
+                return
+            }
+            if ($classification -and
+                    ($startupState.State -eq 'READY' -or $classification.State -in @('FOREIGN_PORT', 'UNHEALTHY'))) {
+                $pidSuffix = if ($classification.ServicePid) { " - PID $($classification.ServicePid)" } else { '' }
+                $messageSuffix = if ($classification.Message) { " ($($classification.Message))" } else { '' }
+                Write-Output "$($classification.State)$pidSuffix$messageSuffix"
+                return
+            }
+
+            Write-StatusWithoutProbe -Paths $Paths -Snapshot $currentSnapshot
+            return
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
+        }
+    }
+
+    $guard = Enter-StartupLockGuard -Paths $Paths
+    try {
+        Write-StatusWithoutProbe -Paths $Paths -Snapshot (Get-StartupStatusSnapshot -Paths $Paths)
+    } finally {
+        Exit-StartupLockGuard -Guard $guard
+    }
 }
 
 switch ($Action) {

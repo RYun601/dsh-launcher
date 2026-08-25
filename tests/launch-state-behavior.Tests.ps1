@@ -82,12 +82,13 @@ function Start-StateHelperProcess {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
         [Parameter(Mandatory = $true)][string]$OutputPath,
-        [Parameter(Mandatory = $true)][string]$ErrorPath
+        [Parameter(Mandatory = $true)][string]$ErrorPath,
+        [string]$HelperPath = $stateHelper
     )
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $powerShellPath
-    $startInfo.Arguments = (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $stateHelper) + $Arguments) -join ' '
+    $startInfo.Arguments = (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $HelperPath) + $Arguments) -join ' '
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardOutput = $false
@@ -488,6 +489,151 @@ try {
         }
     }
 
+    Invoke-Test 'identity replacement keeps the old or new authoritative record visible' {
+        $launchRoot = Join-Path $testRoot 'identity-replace-visibility'
+        $startupToken = '34343434343434343434343434343434'
+        $coordinatorScript = Join-Path $testRoot 'replace-visible-start-background.ps1'
+        $runnerScript = Join-Path $testRoot 'replace-visible-background-run.ps1'
+        $coordinator = Start-TestScriptProcess -ScriptPath $coordinatorScript
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $transfer = $null
+        try {
+            $acquired = Invoke-StateHelper -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $coordinator.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $coordinatorScript
+            )
+            Assert-Equal 0 $acquired.ExitCode "The coordinator lock should be created. Output:`n$($acquired.Output)"
+
+            $lockRoot = Join-Path $launchRoot 'dsh-startup.lock'
+            $identityPath = Join-Path $lockRoot 'identity.json'
+            $signalPath = Join-Path $testRoot 'identity-before-replace.signal'
+            $continuePath = Join-Path $testRoot 'identity-before-replace.continue'
+            $transferOutput = Join-Path $testRoot 'identity-replace.out'
+            $transferError = Join-Path $testRoot 'identity-replace.err'
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL = $signalPath
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE = $continuePath
+            $transfer = Start-StateHelperProcess -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', [string]$runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript,
+                '-TransferOwnership'
+            ) -OutputPath $transferOutput -ErrorPath $transferError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $transfer.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) `
+                'Identity replacement must expose the controlled pre-commit interleave'
+            $oldIdentity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            Assert-Equal $coordinator.Id $oldIdentity.OwnerPid `
+                'The complete old identity must remain visible before replacement commits'
+
+            Set-Content -LiteralPath (Join-Path $lockRoot 'pid.txt') -Value $runner.Id -Encoding ASCII
+            [IO.File]::WriteAllText(
+                (Join-Path $lockRoot 'script-path.txt'),
+                [IO.Path]::GetFullPath($coordinatorScript),
+                [Text.UTF8Encoding]::new($false)
+            )
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $transfer.WaitForExit(10000) 'Identity replacement should finish after the hook continues'
+            Assert-Match ([IO.File]::ReadAllText($transferOutput).Trim()) "OWNED $($runner.Id)" `
+                "Identity replacement should succeed. Error:`n$([IO.File]::ReadAllText($transferError))"
+            $newIdentity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            Assert-Equal $runner.Id $newIdentity.OwnerPid 'The complete new identity must be authoritative after commit'
+            $observed = Invoke-StateHelper -Arguments @('-Action', 'TestStartupLock', '-LaunchRoot', $launchRoot)
+            Assert-Match $observed.Output "LOCKED $($runner.Id)" `
+                'Mixed legacy fields must not become authoritative after atomic replacement'
+        } finally {
+            Remove-Item Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+                Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE -ErrorAction SilentlyContinue
+            if ($transfer -and -not $transfer.HasExited) {
+                Stop-Process -Id $transfer.Id -Force -ErrorAction SilentlyContinue
+                $transfer.WaitForExit()
+            }
+            foreach ($process in @($coordinator, $runner)) {
+                if ($process -and -not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit()
+                }
+            }
+        }
+    }
+
+    Invoke-Test 'a failed identity replacement preserves the old authoritative record' {
+        $launchRoot = Join-Path $testRoot 'identity-replace-failure'
+        $startupToken = '35353535353535353535353535353535'
+        $coordinatorScript = Join-Path $testRoot 'replace-failure-start-background.ps1'
+        $runnerScript = Join-Path $testRoot 'replace-failure-background-run.ps1'
+        $coordinator = Start-TestScriptProcess -ScriptPath $coordinatorScript
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $transfer = $null
+        try {
+            $acquired = Invoke-StateHelper -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $coordinator.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $coordinatorScript
+            )
+            Assert-Equal 0 $acquired.ExitCode "The coordinator lock should be created. Output:`n$($acquired.Output)"
+
+            $lockRoot = Join-Path $launchRoot 'dsh-startup.lock'
+            $identityPath = Join-Path $lockRoot 'identity.json'
+            $signalPath = Join-Path $testRoot 'identity-before-failure.signal'
+            $continuePath = Join-Path $testRoot 'identity-before-failure.continue'
+            $transferOutput = Join-Path $testRoot 'identity-failure.out'
+            $transferError = Join-Path $testRoot 'identity-failure.err'
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL = $signalPath
+            $env:DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE = $continuePath
+            $env:DSH_TEST_IDENTITY_REPLACE_FAILURE = '1'
+            $transfer = Start-StateHelperProcess -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', [string]$runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript,
+                '-TransferOwnership'
+            ) -OutputPath $transferOutput -ErrorPath $transferError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $transfer.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) `
+                'The injected replacement failure must pause before committing identity'
+            $visibleIdentity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            Assert-Equal $coordinator.Id $visibleIdentity.OwnerPid `
+                'The old identity must remain readable before an injected replacement failure'
+            Set-Content -LiteralPath (Join-Path $lockRoot 'pid.txt') -Value $runner.Id -Encoding ASCII
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $transfer.WaitForExit(10000) 'Injected identity replacement should terminate promptly'
+            Assert-Match ([IO.File]::ReadAllText($transferError)) 'Injected identity replacement failure' `
+                'The injected replacement failure must be observable by the caller'
+            $preservedIdentity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+            Assert-Equal $coordinator.Id $preservedIdentity.OwnerPid `
+                'A failed replacement must leave the complete old identity authoritative'
+            $observed = Invoke-StateHelper -Arguments @('-Action', 'TestStartupLock', '-LaunchRoot', $launchRoot)
+            Assert-Match $observed.Output "LOCKED $($coordinator.Id)" `
+                'Mixed legacy fields must not take authority after replacement failure'
+        } finally {
+            Remove-Item Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_SIGNAL, `
+                Env:\DSH_TEST_IDENTITY_BEFORE_REPLACE_CONTINUE, `
+                Env:\DSH_TEST_IDENTITY_REPLACE_FAILURE -ErrorAction SilentlyContinue
+            if ($transfer -and -not $transfer.HasExited) {
+                Stop-Process -Id $transfer.Id -Force -ErrorAction SilentlyContinue
+                $transfer.WaitForExit()
+            }
+            foreach ($process in @($coordinator, $runner)) {
+                if ($process -and -not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit()
+                }
+            }
+        }
+    }
+
     Invoke-Test 'READY state records immutable launch identity and never writes RUNNING' {
         $launchRoot = Join-Path $testRoot 'ready-state'
         $startupToken = '44444444444444444444444444444444'
@@ -830,6 +976,195 @@ try {
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'a stale STARTING probe cannot overwrite a newer lock and state identity' {
+        $launchRoot = Join-Path $testRoot 'status-probe-revalidation'
+        $tokenA = '71717171717171717171717171717171'
+        $tokenB = '72727272727272727272727272727272'
+        $fixture = New-ClassifierFixture -Name 'status-probe-revalidation-classifier' `
+            -ClassificationState 'READY' -ServicePid 7100
+        $runnerScriptA = Join-Path $testRoot 'probe-background-run-a.ps1'
+        $runnerScriptB = Join-Path $testRoot 'probe-background-run-b.ps1'
+        $runnerA = Start-TestScriptProcess -ScriptPath $runnerScriptA
+        $runnerB = Start-TestScriptProcess -ScriptPath $runnerScriptB
+        $statusProcess = $null
+        try {
+            $lockA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerA.Id, '-StartupToken', $tokenA,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScriptA
+            )
+            Assert-Equal 0 $lockA.ExitCode "Token-A lock setup should succeed. Output:`n$($lockA.Output)"
+            $stateA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runnerA.Id, '-Version', '0.1.0-rc.7',
+                '-StartupToken', $tokenA, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $stateA.ExitCode "Token-A state setup should succeed. Output:`n$($stateA.Output)"
+
+            $signalPath = Join-Path $testRoot 'status-after-probe.signal'
+            $continuePath = Join-Path $testRoot 'status-after-probe.continue'
+            $statusOutput = Join-Path $testRoot 'status-probe.out'
+            $statusError = Join-Path $testRoot 'status-probe.err'
+            $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
+            $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = [string]$fixture.ServicePid
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            $statusProcess = Start-StateHelperProcess -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', '31996'
+            ) -OutputPath $statusOutput -ErrorPath $statusError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $statusProcess.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) `
+                'GetStatus must expose the controlled post-probe interleave before committing READY'
+
+            $releaseA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'ReleaseStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerA.Id, '-StartupToken', $tokenA
+            )
+            Assert-Equal 'RELEASED' $releaseA.Output 'The token-A lock should be released during the paused probe'
+            $lockB = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerB.Id, '-StartupToken', $tokenB,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScriptB
+            )
+            Assert-Equal 0 $lockB.ExitCode "Token-B lock setup should succeed. Output:`n$($lockB.Output)"
+            $stateB = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runnerB.Id, '-Version', '0.1.0-rc.8',
+                '-StartupToken', $tokenB, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $stateB.ExitCode "Token-B state setup should succeed. Output:`n$($stateB.Output)"
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $statusProcess.WaitForExit(15000) 'GetStatus should finish after the interleave is released'
+            $finalState = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal $tokenB $finalState.StartupToken 'The stale token-A probe must never overwrite token-B state'
+            Assert-Equal $runnerB.Id $finalState.RunnerPid 'The stale probe must never restore the token-A runner'
+            $trace = @(Get-Content -LiteralPath $fixture.TracePath)
+            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31996\|.*\|$tokenA\|$($runnerA.Id)\|" `
+                'The test must observe the initial token-A probe'
+            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31996\|.*\|$tokenB\|$($runnerB.Id)\|" `
+                'After invalidation, GetStatus must classify the new token-B snapshot'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
+                Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
+                Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            if ($statusProcess -and -not $statusProcess.HasExited) {
+                Stop-Process -Id $statusProcess.Id -Force -ErrorAction SilentlyContinue
+                $statusProcess.WaitForExit()
+            }
+            foreach ($process in @($runnerA, $runnerB)) {
+                if ($process -and -not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit()
+                }
+            }
+        }
+    }
+
+    Invoke-Test 'cached STARTING is revalidated after lock transfer without a stale version' {
+        $launchRoot = Join-Path $testRoot 'status-starting-revalidation'
+        $tokenA = '73737373737373737373737373737373'
+        $tokenB = '74747474747474747474747474747474'
+        $fixture = New-ClassifierFixture -Name 'status-starting-revalidation-classifier' `
+            -ClassificationState 'STOPPED' -ServicePid 0
+        $runnerScriptA = Join-Path $testRoot 'cached-background-run-a.ps1'
+        $runnerScriptB = Join-Path $testRoot 'cached-background-run-b.ps1'
+        $runnerA = Start-TestScriptProcess -ScriptPath $runnerScriptA
+        $runnerB = Start-TestScriptProcess -ScriptPath $runnerScriptB
+        $statusProcess = $null
+        try {
+            $lockA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerA.Id, '-StartupToken', $tokenA,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScriptA
+            )
+            Assert-Equal 0 $lockA.ExitCode "Token-A lock setup should succeed. Output:`n$($lockA.Output)"
+            $stateA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runnerA.Id, '-Version', 'old-version',
+                '-StartupToken', $tokenA, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $stateA.ExitCode "Token-A state setup should succeed. Output:`n$($stateA.Output)"
+
+            $signalPath = Join-Path $testRoot 'starting-after-probe.signal'
+            $continuePath = Join-Path $testRoot 'starting-after-probe.continue'
+            $statusOutput = Join-Path $testRoot 'starting-revalidation.out'
+            $statusError = Join-Path $testRoot 'starting-revalidation.err'
+            $env:DSH_TEST_STATUS_AFTER_PROBE_SIGNAL = $signalPath
+            $env:DSH_TEST_STATUS_AFTER_PROBE_CONTINUE = $continuePath
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = '0'
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            $statusProcess = Start-StateHelperProcess -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', '31997'
+            ) -OutputPath $statusOutput -ErrorPath $statusError
+
+            $signalDeadline = (Get-Date).AddSeconds(10)
+            while ((Get-Date) -lt $signalDeadline -and -not (Test-Path -LiteralPath $signalPath) -and
+                    -not $statusProcess.HasExited) {
+                [Threading.Thread]::Sleep(25)
+            }
+            Assert-True (Test-Path -LiteralPath $signalPath) `
+                'GetStatus must pause after the cached token-A STARTING probe'
+
+            $releaseA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'ReleaseStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerA.Id, '-StartupToken', $tokenA
+            )
+            Assert-Equal 'RELEASED' $releaseA.Output 'The token-A lock should be released while status is paused'
+            $lockB = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runnerB.Id, '-StartupToken', $tokenB,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScriptB
+            )
+            Assert-Equal 0 $lockB.ExitCode "Token-B lock setup should succeed. Output:`n$($lockB.Output)"
+            $stateB = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runnerB.Id, '-Version', 'new-version',
+                '-StartupToken', $tokenB, '-RuntimeRoot', $runtimeRoot,
+                '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $stateB.ExitCode "Token-B state setup should succeed. Output:`n$($stateB.Output)"
+            [IO.File]::WriteAllText($continuePath, 'continue', [Text.Encoding]::ASCII)
+
+            Assert-True $statusProcess.WaitForExit(15000) 'GetStatus should finish after STARTING revalidation'
+            $output = [IO.File]::ReadAllText($statusOutput).Trim()
+            Assert-Match $output "^STARTING - PID $($runnerB.Id) - version new-version$" `
+                'Status must describe the revalidated token-B lock and matching version'
+            Assert-NotMatch $output 'old-version' 'Status must not leak the invalidated token-A version'
+            $trace = @(Get-Content -LiteralPath $fixture.TracePath)
+            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31997\|.*\|$tokenA\|$($runnerA.Id)\|" `
+                'The test must observe the initial token-A wait'
+            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31997\|.*\|$tokenB\|$($runnerB.Id)\|" `
+                'Status must retry classification against the new token-B snapshot'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
+                Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, Env:\DSH_TEST_CLASSIFIER_PID, `
+                Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            if ($statusProcess -and -not $statusProcess.HasExited) {
+                Stop-Process -Id $statusProcess.Id -Force -ErrorAction SilentlyContinue
+                $statusProcess.WaitForExit()
+            }
+            foreach ($process in @($runnerA, $runnerB)) {
+                if ($process -and -not $process.HasExited) {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                    $process.WaitForExit()
+                }
             }
         }
     }
