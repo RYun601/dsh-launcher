@@ -1,3 +1,69 @@
+function ConvertFrom-DshWindowsCommandLine {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return @()
+    }
+
+    if (-not ('DshLauncher.NativeCommandLine' -as [type])) {
+        $typeDefinition = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace DshLauncher
+{
+    public static class NativeCommandLine
+    {
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(
+            [MarshalAs(UnmanagedType.LPWStr)] string commandLine,
+            out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string[] Split(string commandLine)
+        {
+            int argumentCount;
+            IntPtr argumentPointer = CommandLineToArgvW(commandLine, out argumentCount);
+            if (argumentPointer == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            try
+            {
+                string[] arguments = new string[argumentCount];
+                for (int index = 0; index < argumentCount; index++)
+                {
+                    IntPtr value = Marshal.ReadIntPtr(argumentPointer, index * IntPtr.Size);
+                    arguments[index] = Marshal.PtrToStringUni(value);
+                }
+                return arguments;
+            }
+            finally
+            {
+                LocalFree(argumentPointer);
+            }
+        }
+    }
+}
+'@
+        try {
+            Add-Type -TypeDefinition $typeDefinition -Language CSharp -ErrorAction Stop | Out-Null
+        } catch {
+            return @()
+        }
+    }
+
+    try {
+        return @([DshLauncher.NativeCommandLine]::Split($CommandLine))
+    } catch {
+        return @()
+    }
+}
+
 function Test-DshCommandLineArgument {
     param(
         [string]$CommandLine,
@@ -9,11 +75,30 @@ function Test-DshCommandLineArgument {
     }
 
     try {
-        $escaped = [regex]::Escape([IO.Path]::GetFullPath($ExpectedPath))
+        $normalizedExpectedPath = [IO.Path]::GetFullPath($ExpectedPath)
     } catch {
         return $false
     }
-    return $CommandLine -match ('(?i)(?:^|\s)"?' + $escaped + '"?(?:\s|$)')
+
+    $arguments = @(ConvertFrom-DshWindowsCommandLine -CommandLine $CommandLine)
+    for ($index = 1; $index -lt $arguments.Count; $index++) {
+        $argument = [string]$arguments[$index]
+        if (-not [IO.Path]::IsPathRooted($argument)) {
+            continue
+        }
+        try {
+            $normalizedArgument = [IO.Path]::GetFullPath($argument)
+        } catch {
+            continue
+        }
+        if ([string]::Equals(
+                $normalizedArgument,
+                $normalizedExpectedPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-DshPortOwner {
@@ -28,11 +113,19 @@ function Get-DshPortOwner {
     } catch {
         return $null
     }
-    if ($connections.Count -eq 0) {
+    $loopbackCandidates = @($connections | Where-Object {
+        [string]$_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::')
+    })
+    if ($loopbackCandidates.Count -eq 0) {
         return $null
     }
 
-    $connection = $connections | Sort-Object OwningProcess | Select-Object -First 1
+    $candidateOwners = @($loopbackCandidates | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($candidateOwners.Count -ne 1) {
+        return $null
+    }
+
+    $connection = $loopbackCandidates | Select-Object -First 1
     return [pscustomobject]@{
         ProcessId     = [int]$connection.OwningProcess
         OwningProcess = [int]$connection.OwningProcess

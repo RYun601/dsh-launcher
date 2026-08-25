@@ -180,6 +180,48 @@ try {
         Assert-Equal 'FOREIGN_PORT' $spoof.State 'A substring marker must not establish identity'
     }
 
+    Invoke-Test 'quoted argument containing the entrypoint plus extra text is rejected' {
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            Name = 'node.exe'
+            CommandLine = 'node.exe "' + $script:ExpectedEntrypoint + ' --not-a-separate-argument"'
+            ExecutablePath = 'C:\node\node.exe'
+        }
+        Assert-Equal $false (Test-DshProcessIdentity -ProcessId 1234 -ExpectedEntrypoint $script:ExpectedEntrypoint) `
+            'A quoted argument that merely starts with the entrypoint must not establish identity'
+    }
+
+    Invoke-Test 'unquoted entrypoint containing spaces is rejected' {
+        $entrypointWithSpace = Join-Path $testRoot 'runtime with space\node_modules\@deepseek-ai\dsh\lib\bin.js'
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            Name = 'node.exe'
+            CommandLine = 'node.exe ' + $entrypointWithSpace + ' --port 12345'
+            ExecutablePath = 'C:\node\node.exe'
+        }
+        Assert-Equal $false (Test-DshProcessIdentity -ProcessId 1234 -ExpectedEntrypoint $entrypointWithSpace) `
+            'An unquoted path containing spaces is multiple arguments, not the expected entrypoint argument'
+    }
+
+    Invoke-Test 'entrypoint argument comparison is case insensitive' {
+        $upperEntrypoint = $script:ExpectedEntrypoint.ToUpperInvariant()
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            Name = 'node.exe'
+            CommandLine = 'node.exe "' + $upperEntrypoint + '" --port 12345'
+            ExecutablePath = 'C:\node\node.exe'
+        }
+        Assert-Equal $true (Test-DshProcessIdentity -ProcessId 1234 -ExpectedEntrypoint $script:ExpectedEntrypoint) `
+            'Windows entrypoint comparison must remain case insensitive'
+    }
+
+    Invoke-Test 'entrypoint path prefix is rejected' {
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            Name = 'node.exe'
+            CommandLine = 'node.exe "' + $script:ExpectedEntrypoint + '.backup" --port 12345'
+            ExecutablePath = 'C:\node\node.exe'
+        }
+        Assert-Equal $false (Test-DshProcessIdentity -ProcessId 1234 -ExpectedEntrypoint $script:ExpectedEntrypoint) `
+            'A longer path sharing the entrypoint prefix must not establish identity'
+    }
+
     Invoke-Test 'identified listener with failed HTTP is unhealthy' {
         $dead = Invoke-Classification -CommandLine $expectedNodeCommand -Body 'error' -StatusCode 500
         Assert-Equal 'UNHEALTHY' $dead.State 'An identified listener with dead HTTP is unhealthy'
@@ -215,6 +257,42 @@ try {
                 -RunnerPid 2147483647
             Assert-Equal 'UNHEALTHY' $deadRunner.State 'A dead runner must not establish a managed service'
         } finally {
+            Stop-FakeHttpFixture -Fixture $fixture
+        }
+    }
+
+    Invoke-Test 'different owners on loopback-capable bindings cannot be combined with HTTP readiness' {
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            Name = 'node.exe'
+            CommandLine = $expectedNodeCommand
+            ExecutablePath = 'C:\node\node.exe'
+        }
+        $fixture = Start-FakeHttpFixture -Body '<div id="root"></div>' -StatusCode 200
+        $priorNetTcpFunction = Get-Item -LiteralPath Function:\Get-NetTCPConnection -ErrorAction SilentlyContinue
+        $priorNetTcpScriptBlock = if ($priorNetTcpFunction) { $priorNetTcpFunction.ScriptBlock } else { $null }
+        function script:Get-NetTCPConnection {
+            param([int]$LocalPort, [string]$State)
+
+            return @(
+                [pscustomobject]@{ LocalAddress = '192.0.2.10'; LocalPort = $LocalPort; OwningProcess = 50 },
+                [pscustomobject]@{ LocalAddress = '0.0.0.0'; LocalPort = $LocalPort; OwningProcess = 100 },
+                [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = $LocalPort; OwningProcess = 200 }
+            )
+        }
+        try {
+            $classification = Get-DshServiceClassification -Port $fixture.Port `
+                -ExpectedEntrypoint $script:ExpectedEntrypoint `
+                -ExpectedStartupToken $script:ExpectedStartupToken -RunnerPid $PID
+            Assert-True ($classification.State -ne 'READY') `
+                'HTTP on 127.0.0.1 must not be combined with an arbitrarily selected owner from another binding'
+            Assert-Equal $null (Get-DshPortOwner -Port $fixture.Port) `
+                'Multiple loopback-capable owners must fail closed'
+        } finally {
+            if ($priorNetTcpScriptBlock) {
+                Set-Item -LiteralPath Function:\Get-NetTCPConnection -Value $priorNetTcpScriptBlock
+            } else {
+                Remove-Item -LiteralPath Function:\Get-NetTCPConnection -ErrorAction SilentlyContinue
+            }
             Stop-FakeHttpFixture -Fixture $fixture
         }
     }
