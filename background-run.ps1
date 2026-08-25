@@ -6,6 +6,13 @@ param(
 
     [string]$StartupToken = $env:DSH_STARTUP_TOKEN,
 
+    [string]$RuntimeRoot,
+
+    [string]$Entrypoint,
+
+    [ValidateRange(1, 65535)]
+    [int]$Port = 3080,
+
     [string]$CoordinatorGate = $env:DSH_COORDINATOR_GATE,
 
     [switch]$SuppressBrowserMonitor,
@@ -30,6 +37,12 @@ if ($env:DSH_SUPPRESS_BROWSER_MONITOR -eq '1') {
 }
 if (-not $StartupToken) {
     $StartupToken = [guid]::NewGuid().ToString('N')
+}
+if (-not $RuntimeRoot) {
+    $RuntimeRoot = Join-Path $LaunchRoot 'runtime'
+}
+if (-not $Entrypoint) {
+    $Entrypoint = Join-Path $RuntimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 }
 
 New-Item -ItemType Directory -Force -Path $LaunchRoot | Out-Null
@@ -61,7 +74,8 @@ function Set-RunnerStartupStage {
     $script:currentStartupStage = $stage
     try {
         $stageOutput = @(& $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State STARTING `
-            -OwnerPid $PID -Version $Version -Message $stage 2>&1)
+            -OwnerPid $PID -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot `
+            -Entrypoint $Entrypoint -Version $Version -Message $stage 2>&1)
         Add-RunnerLogLines -Lines $stageOutput
     } catch {
         Add-Content -LiteralPath $log -Encoding UTF8 -Value ('Startup stage write failed: ' + $_.Exception.Message)
@@ -90,6 +104,7 @@ if ($CoordinatorGate) {
         Add-RunnerLogLines -Lines $releaseOutput
         if ($gateAction -eq 'CANCEL') { exit 0 }
         $failureOutput = @(& $stateHelper -Action RecordStartupExit -LaunchRoot $LaunchRoot -OwnerPid $PID `
+            -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot -Entrypoint $Entrypoint `
             -Version $Version -ExitCode 1 -Message $message 2>&1)
         Add-RunnerLogLines -Lines $failureOutput
         exit 1
@@ -98,7 +113,8 @@ if ($CoordinatorGate) {
 
 try {
     $lockOutput = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $LaunchRoot `
-        -OwnerPid $PID -StartupToken $StartupToken -TransferOwnership 2>&1)
+        -OwnerPid $PID -StartupToken $StartupToken -CommandPath $systemPowerShell `
+        -ScriptPath $MyInvocation.MyCommand.Path -TransferOwnership 2>&1)
     $lockExitCode = $LASTEXITCODE
     $lockText = [string]($lockOutput -join [Environment]::NewLine)
     Add-Content -LiteralPath $log -Encoding UTF8 -Value $lockText
@@ -108,7 +124,8 @@ try {
     $ownsStartupLock = $true
 
     & $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State STARTING `
-        -OwnerPid $PID -Version $Version -Message 'Installing or starting DeepSeek Harness' | Out-Null
+        -OwnerPid $PID -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot `
+        -Entrypoint $Entrypoint -Version $Version -Message 'Installing or starting DeepSeek Harness' | Out-Null
     Add-Content -LiteralPath $log -Encoding UTF8 -Value "DSH version: $Version"
     Add-Content -LiteralPath $log -Encoding UTF8 -Value "Command: run-dsh.ps1 -Version $Version web -NoOpen"
 
@@ -120,6 +137,11 @@ try {
             '-ParentPid', [string]$PID,
             '-LaunchRoot', "`"$LaunchRoot`"",
             '-OwnerPid', [string]$PID,
+            '-StartupToken', $StartupToken,
+            '-RuntimeRoot', "`"$RuntimeRoot`"",
+            '-Entrypoint', "`"$Entrypoint`"",
+            '-Port', [string]$Port,
+            '-StableMilliseconds', '5000',
             '-PollIntervalMilliseconds', '200'
         )
         Start-Process -FilePath $systemPowerShell -ArgumentList $monitorArguments `
@@ -130,6 +152,7 @@ try {
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', $runScript,
         '-Version', $Version,
+        '-RuntimeRoot', $RuntimeRoot,
         '-DshArguments', 'web',
         '-NoOpen'
     )
@@ -150,11 +173,14 @@ try {
     Add-Content -LiteralPath $log -Encoding UTF8 -Value ("Runner failure: " + $_.Exception.Message)
     if ($ownsStartupLock -and -not $dshStarted) {
         & $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State FAILED `
-            -OwnerPid $PID -Version $Version -ExitCode $dshExitCode -Message $_.Exception.Message | Out-Null
+            -OwnerPid $PID -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot `
+            -Entrypoint $Entrypoint -Version $Version -ExitCode $dshExitCode `
+            -Message $_.Exception.Message | Out-Null
     }
 } finally {
     if ($dshStarted) {
         $exitOutput = @(& $stateHelper -Action RecordStartupExit -LaunchRoot $LaunchRoot -OwnerPid $PID `
+            -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot -Entrypoint $Entrypoint `
             -Version $Version -ExitCode $dshExitCode -Message 'DSH exited before readiness' 2>&1)
         Add-RunnerLogLines -Lines $exitOutput
     }

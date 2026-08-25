@@ -17,6 +17,7 @@ $requiredRuntimeFiles = @(
     'deepseek.cmd',
     'background-run.cmd',
     'background-run.ps1',
+    'start-foreground.ps1',
     'start-background.ps1',
     'dsh-launch-state.ps1',
     'dsh-service-health.ps1',
@@ -174,7 +175,7 @@ public static class FakePowerShell
     Assert-Equal 0 $foreground.ExitCode "Packaged foreground dispatch failed. Output:`n$($foreground.Output)"
     Assert-Equal 0 $background.ExitCode "Packaged background dispatch failed. Output:`n$($background.Output)"
     $dispatches = [IO.File]::ReadAllText($processLog)
-    Assert-Match $dispatches 'run-dsh\.ps1' 'Extracted foreground command must reach the packaged runtime script'
+    Assert-Match $dispatches 'start-foreground\.ps1' 'Extracted foreground command must reach the packaged foreground coordinator'
     Assert-Match $dispatches 'start-background\.ps1' 'Extracted background command must reach the packaged coordinator script'
 
     Write-Host 'PASS: assembled release package contains and dispatches every required runtime path'

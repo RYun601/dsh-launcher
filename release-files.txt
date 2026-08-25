@@ -15,6 +15,7 @@ README.md
 resolve-dsh-version.ps1
 run-dsh.ps1
 set-shortcut.ps1
+start-foreground.ps1
 start-background.cmd
 start-background.ps1
 start-deepseek-harness.bat

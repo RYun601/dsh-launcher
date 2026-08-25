@@ -28,6 +28,8 @@ $global:DshTestScenario = $Scenario
 $global:DshTestPortChecks = 0
 $global:DshTestProcessLogPath = $ProcessLogPath
 $global:DshTestWebRequestCount = 0
+$global:DshTestRunnerPid = 4242
+$global:DshTestServicePid = 4343
 
 $runtimeRoot = Join-Path $ProfilePath 'dsh-launch\runtime'
 $dshRoot = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh'
@@ -57,14 +59,34 @@ function global:Get-NetTCPConnection {
         "GET_NET_TCP_CONNECTION`t$LocalPort$([Environment]::NewLine)",
         [Text.Encoding]::UTF8
     )
-    if ($global:DshTestPortChecks -eq 1 -or $global:DshTestScenario -eq 'Failed') {
-        if ($global:DshTestScenario -in @('OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')) {
-            return [pscustomobject]@{ OwningProcess = 4242 }
+    if ($global:DshTestScenario -eq 'Staged' -and $global:DshTestPortChecks -gt 1) {
+        $statePath = Join-Path $env:USERPROFILE 'dsh-launch\dsh-startup.json'
+        $stagedPhases = @('PREPARING_RUNTIME', 'INSTALLING_PEERS:21', 'VALIDATING_RUNTIME', 'STARTING_WEB')
+        $phaseIndex = $global:DshTestPortChecks - 2
+        if ($phaseIndex -lt $stagedPhases.Count -and (Test-Path -LiteralPath $statePath)) {
+            $stagedState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+            $stagedState.Message = $stagedPhases[$phaseIndex]
+            [IO.File]::WriteAllText($statePath, ($stagedState | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
         }
+        if ($global:DshTestPortChecks -lt ($stagedPhases.Count + 3)) { return $null }
+    }
+
+    if ($global:DshTestScenario -in @('OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')) {
+        return [pscustomobject]@{
+            LocalAddress = '127.0.0.1'
+            LocalPort = $LocalPort
+            OwningProcess = $global:DshTestServicePid
+        }
+    }
+    if ($global:DshTestPortChecks -eq 1 -or $global:DshTestScenario -eq 'Failed') {
         return $null
     }
 
-    return [pscustomobject]@{ OwningProcess = 4242 }
+    return [pscustomobject]@{
+        LocalAddress = '127.0.0.1'
+        LocalPort = $LocalPort
+        OwningProcess = $global:DshTestServicePid
+    }
 }
 
 function global:Get-CimInstance {
@@ -73,16 +95,38 @@ function global:Get-CimInstance {
         [string]$Filter
     )
 
-    $identityScenario = $global:DshTestScenario -in @('OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy')
-    if (-not $identityScenario) {
+    $processId = if ($Filter -match 'ProcessId=(\d+)') { [int]$Matches[1] } else { 0 }
+    if ($processId -eq $global:DshTestRunnerPid) {
+        return [pscustomobject]@{
+            Name = 'powershell.exe'
+            CommandLine = 'powershell.exe -File "' + (Join-Path (Split-Path $ScriptPath -Parent) 'background-run.ps1') + '"'
+            ExecutablePath = Join-Path $PSHOME 'powershell.exe'
+        }
+    }
+    if ($processId -ne $global:DshTestServicePid) {
         return CimCmdlets\Get-CimInstance -ClassName $ClassName -Filter $Filter
     }
-    $commandLine = switch ($global:DshTestScenario) {
-        'OccupiedForeign'   { 'C:\apps\other-server.exe --serve' }
-        'OccupiedReady'     { 'C:\node\node.exe C:\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js web' }
-        'OccupiedUnhealthy' { 'C:\node\node.exe C:\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js web' }
+    if ($global:DshTestScenario -eq 'OccupiedForeign') {
+        return [pscustomobject]@{
+            Name = 'other-server.exe'
+            CommandLine = 'C:\apps\other-server.exe --serve'
+            ExecutablePath = 'C:\apps\other-server.exe'
+        }
     }
-    return [pscustomobject]@{ CommandLine = $commandLine }
+    return [pscustomobject]@{
+        Name = 'node.exe'
+        CommandLine = 'node.exe "' + (Join-Path $dshRoot 'lib\bin.js') + '" web'
+        ExecutablePath = 'C:\node\node.exe'
+    }
+}
+
+function global:Get-Process {
+    param([int]$Id, [object]$ErrorAction)
+
+    if ($Id -eq $global:DshTestRunnerPid) {
+        return [pscustomobject]@{ Id = $Id; HasExited = $false }
+    }
+    return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction $ErrorAction
 }
 
 function global:Start-Process {
@@ -112,54 +156,10 @@ function global:Start-Process {
 
     if ($PassThru) {
         return [pscustomobject]@{
-            Id        = 4242
+            Id        = $global:DshTestRunnerPid
             HasExited = ($global:DshTestScenario -in @('Immediate', 'Failed'))
         }
     }
-}
-
-function global:Invoke-WebRequest {
-    param(
-        [string]$Uri,
-        [switch]$UseBasicParsing,
-        [int]$TimeoutSec,
-        [object]$ErrorAction
-    )
-
-    [IO.File]::AppendAllText(
-        $global:DshTestProcessLogPath,
-        "WEB_REQUEST`t$Uri$([Environment]::NewLine)",
-        [Text.Encoding]::UTF8
-    )
-
-    if ($global:DshTestScenario -eq 'Staged') {
-        $global:DshTestWebRequestCount++
-        $statePath = Join-Path $env:USERPROFILE 'dsh-launch\dsh-startup.json'
-        $stagedPhases = @('PREPARING_RUNTIME', 'INSTALLING_PEERS:21', 'VALIDATING_RUNTIME', 'STARTING_WEB')
-        if ($global:DshTestWebRequestCount -le $stagedPhases.Count) {
-            $stagedState = [ordered]@{
-                State   = 'STARTING'
-                Pid     = 4242
-                Version = '0.1.0-rc.8'
-                Message = $stagedPhases[$global:DshTestWebRequestCount - 1]
-            }
-            [IO.File]::WriteAllText(
-                $statePath,
-                ($stagedState | ConvertTo-Json),
-                [Text.UTF8Encoding]::new($false)
-            )
-        }
-        if ($global:DshTestWebRequestCount -lt ($stagedPhases.Count + 2)) {
-            throw 'HTTP endpoint is not ready'
-        }
-        return [pscustomobject]@{ StatusCode = 200 }
-    }
-
-    if ($global:DshTestScenario -in @('Ready', 'DuplicateReady', 'OccupiedReady')) {
-        return [pscustomobject]@{ StatusCode = 200 }
-    }
-
-    throw 'HTTP endpoint is not ready'
 }
 
 function global:Start-Sleep {
@@ -192,10 +192,12 @@ if ($Scenario -eq 'Staged') {
     Start-Transcript -LiteralPath (Join-Path $logDirectory 'staged-output.txt') -Force | Out-Null
 }
 
+$testStartupToken = '22222222222222222222222222222222'
 if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
     $lockDirectory = Join-Path $ProfilePath 'dsh-launch\dsh-startup.lock'
     New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
     Set-Content -LiteralPath (Join-Path $lockDirectory 'pid.txt') -Value $PID -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $lockDirectory 'token.txt') -Value $testStartupToken -Encoding ASCII
     [IO.File]::WriteAllText(
         (Join-Path $lockDirectory 'command-path.txt'),
         (Join-Path $PSHOME 'powershell.exe'),
@@ -208,6 +210,25 @@ if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
     )
     Set-Content -LiteralPath (Join-Path $lockDirectory 'created-at.txt') `
         -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
+}
+
+if ($Scenario -in @('DuplicateReady', 'OccupiedReady', 'OccupiedUnhealthy')) {
+    $statePath = Join-Path $ProfilePath 'dsh-launch\dsh-startup.json'
+    $state = [ordered]@{
+        State = if ($Scenario -eq 'OccupiedReady') { 'READY' } else { 'STARTING' }
+        Pid = $PID
+        RunnerPid = $PID
+        ServicePid = if ($Scenario -eq 'OccupiedReady') { $global:DshTestServicePid } else { 0 }
+        StartupToken = $testStartupToken
+        RuntimeRoot = $runtimeRoot
+        Entrypoint = Join-Path $dshRoot 'lib\bin.js'
+        Version = '0.1.0-rc.8'
+        StartedAt = [DateTime]::UtcNow.ToString('o')
+        UpdatedAt = [DateTime]::UtcNow.ToString('o')
+        Message = 'test startup'
+        ExitCode = 0
+    }
+    [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 }
 
 $listener = $null
@@ -233,11 +254,13 @@ if ($Scenario -eq 'OccupiedDuplicate') {
 
 if ($Scenario -eq 'DuplicateFailed') {
     $statePath = Join-Path $ProfilePath 'dsh-launch\dsh-startup.json'
-    [IO.File]::WriteAllText(
-        $statePath,
-        '{"State":"FAILED","Pid":0,"Version":"0.1.0-rc.8","Message":"existing startup failed","ExitCode":7}',
-        [Text.Encoding]::ASCII
-    )
+    $failedState = [ordered]@{
+        State = 'FAILED'; Pid = $PID; RunnerPid = $PID; ServicePid = 0
+        StartupToken = $testStartupToken; RuntimeRoot = $runtimeRoot
+        Entrypoint = Join-Path $dshRoot 'lib\bin.js'; Version = '0.1.0-rc.8'
+        Message = 'existing startup failed'; ExitCode = 7
+    }
+    [IO.File]::WriteAllText($statePath, ($failedState | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 }
 
 try {

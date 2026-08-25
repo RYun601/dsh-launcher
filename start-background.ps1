@@ -28,8 +28,14 @@ $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launchRoot = Join-Path $env:USERPROFILE 'dsh-launch'
 $log = Join-Path $launchRoot 'dsh-background.log'
 $stateHelper = Join-Path $dir 'dsh-launch-state.ps1'
+$healthHelper = Join-Path $dir 'dsh-service-health.ps1'
+$runtimeRoot = Join-Path $launchRoot 'runtime'
+$entrypoint = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+$coordinatorCommandPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+$coordinatorScriptPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $url = "http://127.0.0.1:$Port"
 New-Item -ItemType Directory -Force -Path (Split-Path $log -Parent) | Out-Null
+. $healthHelper
 
 function Write-StartupFailure {
     param([string]$Message)
@@ -39,37 +45,6 @@ function Write-StartupFailure {
     if (Test-Path $log) {
         Write-Host '最近日志：'
         Get-Content $log -Tail 8 -Encoding UTF8 | ForEach-Object { Write-Host $_ }
-    }
-}
-
-function Test-DshReady {
-    try {
-        $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-        return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
-    } catch {
-        return $false
-    }
-}
-
-function Test-TcpPortOpen {
-    param(
-        [string]$HostName = '127.0.0.1',
-        [Parameter(Mandatory = $true)][int]$TargetPort,
-        [int]$TimeoutMilliseconds = 200
-    )
-
-    $client = [Net.Sockets.TcpClient]::new()
-    try {
-        $pending = $client.BeginConnect($HostName, $TargetPort, $null, $null)
-        if (-not $pending.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
-            return $false
-        }
-        $client.EndConnect($pending)
-        return $true
-    } catch {
-        return $false
-    } finally {
-        $client.Dispose()
     }
 }
 
@@ -106,19 +81,31 @@ function Wait-DshStartup {
     $nextHeartbeatSeconds = $HeartbeatSeconds
     $lastDisplayedPhase = ''
     while ((Get-Date) -lt $deadline) {
-        if (Test-DshReady) {
-            Write-Host "DeepSeek Harness 服务已就绪（PID $OwnerPid）"
-            Write-Host '查看状态：deepseek --status'
-            Write-Host '查看日志：deepseek --logs'
-            Write-Host '停止服务：deepseek --stop'
-            return 0
-        }
-
         $startupState = Get-DshStartupState
         if ($startupState -and $startupState.State -eq 'FAILED') {
             $reason = if ($startupState.Message) { [string]$startupState.Message } else { '后台启动失败' }
             Write-StartupFailure "启动失败：$reason"
             return 1
+        }
+
+        if ($startupState -and $startupState.StartupToken -and $startupState.Entrypoint -and
+                $startupState.RunnerPid) {
+            $classification = Wait-DshServiceIdentity -Port $Port `
+                -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
+                -ExpectedStartupToken ([string]$startupState.StartupToken) `
+                -RunnerPid ([int]$startupState.RunnerPid) `
+                -StableMilliseconds 250 -PollMilliseconds 50
+            if ($classification.State -eq 'READY') {
+                Write-Host "DeepSeek Harness 服务已就绪（PID $($classification.ServicePid)）"
+                Write-Host '查看状态：deepseek --status'
+                Write-Host '查看日志：deepseek --logs'
+                Write-Host '停止服务：deepseek --stop'
+                return 0
+            }
+            if ($classification.State -eq 'FOREIGN_PORT') {
+                Write-StartupFailure "启动失败：FOREIGN_PORT - $($classification.Message)"
+                return 1
+            }
         }
 
         $ownerExited = if ($SubmittedProcess) {
@@ -172,20 +159,39 @@ if ($lockText -match '^LOCKED\s+(\d+)') {
     exit (Wait-DshStartup -OwnerPid $existingOwnerPid -HeartbeatSeconds $HeartbeatSeconds)
 }
 
-# 0) 端口预检：只有在确认没有正在进行的 launcher startup 后，才允许
-# 直接复用一个已监听的服务并打开浏览器。这样不会和原 runner 的 monitor 重复打开。
-$existing = if (Test-TcpPortOpen -TargetPort $Port) {
-    Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+# 0) 端口预检：共享 classifier 同时核对端口所有者、精确入口参数、
+# 启动 token、活跃 runner 与 DSH 页面指纹。
+$existingState = Get-DshStartupState
+$existingEntrypoint = if ($existingState -and $existingState.Entrypoint) {
+    [string]$existingState.Entrypoint
+} else {
+    $entrypoint
 }
-if ($existing) {
-    Write-Host "端口 $Port 已有实例在运行（PID $($existing.OwningProcess)），无需重复启动"
+$existingToken = if ($existingState -and $existingState.StartupToken) {
+    [string]$existingState.StartupToken
+} else {
+    ''
+}
+$existingRunnerPid = if ($existingState -and $existingState.RunnerPid) {
+    [int]$existingState.RunnerPid
+} else {
+    0
+}
+$existing = Get-DshServiceClassification -Port $Port -ExpectedEntrypoint $existingEntrypoint `
+    -ExpectedStartupToken $existingToken -RunnerPid $existingRunnerPid
+if ($existing.State -eq 'READY') {
+    Write-Host "[REUSE] 端口 $Port 已有 DeepSeek Harness 实例在运行（PID $($existing.ServicePid)），无需重复启动"
     Write-Host '正在打开浏览器...'
     Start-Process $url
     exit 0
 }
+if ($existing.State -ne 'STOPPED') {
+    Write-Host "[ERROR] $($existing.State) - $($existing.Message)"
+    Write-Host '请先执行 deepseek --stop 停止后重试。'
+    exit 1
+}
 
 if (-not $Version) {
-    $runtimeRoot = Join-Path $launchRoot 'runtime'
     $Version = [string](@(& (Join-Path $dir 'resolve-dsh-version.ps1') `
         -PreferLocalRuntime -RuntimeRoot $runtimeRoot) -join '')
     if (-not $Version) { $Version = 'latest' }
@@ -202,7 +208,8 @@ if (Test-Path $log) {
 $startupToken = [guid]::NewGuid().ToString('N')
 $gatePath = Join-Path $launchRoot ("startup-$startupToken.gate")
 $initialReservation = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $launchRoot `
-    -OwnerPid $PID -StartupToken $startupToken)
+    -OwnerPid $PID -StartupToken $startupToken -CommandPath $coordinatorCommandPath `
+    -ScriptPath $coordinatorScriptPath)
 if ($LASTEXITCODE -eq 2) {
     $owner = ([string]($initialReservation -join [Environment]::NewLine) -replace '^LOCKED\s*', '').Trim()
     Write-Host "DeepSeek Harness 已在启动中（PID $owner），未重复提交启动任务"
@@ -230,6 +237,9 @@ try {
         '-Version', $Version,
         '-LaunchRoot', "`"$launchRoot`"",
         '-StartupToken', $startupToken,
+        '-RuntimeRoot', "`"$runtimeRoot`"",
+        '-Entrypoint', "`"$entrypoint`"",
+        '-Port', [string]$Port,
         '-CoordinatorGate', "`"$gatePath`"",
         '-TimeoutSeconds', [string]$TimeoutSeconds
     )
@@ -251,7 +261,9 @@ try {
         Remove-Item -LiteralPath 'Env:\DSH_COORDINATOR_GATE' -ErrorAction SilentlyContinue
     }
 }
-$reservation = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $proc.Id -StartupToken $startupToken -TransferOwnership)
+$reservation = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $launchRoot `
+    -OwnerPid $proc.Id -StartupToken $startupToken -CommandPath $systemPowerShell `
+    -ScriptPath $runnerScript -TransferOwnership)
 if ($LASTEXITCODE -eq 2) {
     [IO.File]::WriteAllText($gatePath, 'CANCEL', [Text.Encoding]::ASCII)
     $owner = ([string]($reservation -join [Environment]::NewLine) -replace '^LOCKED\s*', '').Trim()
@@ -266,7 +278,8 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 & $stateHelper -Action WriteStartupState -LaunchRoot $launchRoot -State STARTING `
-    -OwnerPid $proc.Id -Version $Version -Message 'Installing or starting DeepSeek Harness' | Out-Null
+    -OwnerPid $proc.Id -StartupToken $startupToken -RuntimeRoot $runtimeRoot `
+    -Entrypoint $entrypoint -Version $Version -Message 'Installing or starting DeepSeek Harness' | Out-Null
 [IO.File]::WriteAllText($gatePath, 'GO', [Text.Encoding]::ASCII)
 
 # 3) 命令行后台模式：提交启动后立即返回，由独立监视器负责就绪后打开浏览器

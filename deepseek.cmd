@@ -105,30 +105,8 @@ set "DSH_RC=!ERRORLEVEL!"
 exit /b !DSH_RC!
 
 :foreground
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue; if ($c) { Write-Host ('[INFO] Port 3080 is already in use (PID ' + $c.OwningProcess + ') - opening browser...'); Start-Process 'http://127.0.0.1:3080'; exit 2 }"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-foreground.ps1"
 set "DSH_RC=%ERRORLEVEL%"
-rem Exit code 2 means an instance is already serving the port; that is the
-rem only short-circuit success here.  Any other nonzero code must fall
-rem through to the real launch so failures are not masked.
-if "%DSH_RC%"=="2" exit /b 0
-echo Starting DeepSeek Harness (foreground)...
-echo Browser will open automatically at http://127.0.0.1:3080
-echo Press Ctrl+C or close this window to stop.
-echo.
-for /f %%P in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId"') do set "DSH_PPID=%%P"
-set "DSH_RC=%ERRORLEVEL%"
-if defined DSH_PPID (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -ParentPid %DSH_PPID% -PollIntervalMilliseconds 200
-) else (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -PollIntervalMilliseconds 200
-)
-for /f "delims=" %%v in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0resolve-dsh-version.ps1" -PreferLocalRuntime') do set "DSH_TARGET=%%v"
-set "DSH_RC=%ERRORLEVEL%"
-if not defined DSH_TARGET set "DSH_TARGET=latest"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-dsh.ps1" -Version "%DSH_TARGET%" -DshArguments web -NoOpen
-set "DSH_RC=%ERRORLEVEL%"
-echo.
-echo Service stopped (or failed to start).
 exit /b %DSH_RC%
 
 :background
