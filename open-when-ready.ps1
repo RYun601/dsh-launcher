@@ -20,6 +20,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Port -ne 3080 -and $env:DSH_TEST_MODE -ne '1') {
+    Write-Host '[ERROR] Production lifecycle startup only supports port 3080. Set DSH_TEST_MODE=1 only for isolated tests.'
+    exit 1
+}
 $url = "http://127.0.0.1:$Port"
 $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
 $healthHelper = Join-Path $PSScriptRoot 'dsh-service-health.ps1'
@@ -32,7 +36,7 @@ while ((Get-Date) -lt $deadline) {
     }
 
     $classification = Wait-DshServiceIdentity -Port $Port -ExpectedEntrypoint $Entrypoint `
-        -ExpectedStartupToken $StartupToken -RunnerPid $OwnerPid `
+        -ExpectedStartupToken $StartupToken -RunnerPid $OwnerPid -LaunchRoot $LaunchRoot `
         -StableMilliseconds $StableMilliseconds -PollMilliseconds $PollIntervalMilliseconds
     if ($classification.State -eq 'READY') {
         & $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State READY `

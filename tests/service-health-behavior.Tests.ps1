@@ -100,6 +100,8 @@ function Invoke-Classification {
         [int]$StableMilliseconds = 0
     )
     $script:DshTestProcessInfo = [pscustomobject]@{
+        ProcessId = 4321
+        ParentProcessId = $script:ExpectedRunnerPid
         Name = if ($CommandLine -match '^node(?:\.exe)?\s') { 'node.exe' } else { 'powershell.exe' }
         CommandLine = $CommandLine
         ExecutablePath = if ($CommandLine -match '^node(?:\.exe)?\s') { 'C:\node\node.exe' } else { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
@@ -256,6 +258,66 @@ try {
                 -ExpectedEntrypoint $script:ExpectedEntrypoint -ExpectedStartupToken $script:ExpectedStartupToken `
                 -RunnerPid 2147483647
             Assert-Equal 'UNHEALTHY' $deadRunner.State 'A dead runner must not establish a managed service'
+        } finally {
+            Stop-FakeHttpFixture -Fixture $fixture
+        }
+    }
+
+    Invoke-Test 'a live but unrelated runner cannot be combined with an identified Node listener' {
+        $fixture = Start-FakeHttpFixture -Body '<div id="root"></div>' -StatusCode 200
+        $priorScopedCim = Get-Item -LiteralPath Function:\Get-CimInstance -ErrorAction SilentlyContinue
+        $priorScopedCimScriptBlock = if ($priorScopedCim) { $priorScopedCim.ScriptBlock } else { $null }
+        try {
+            function script:Get-CimInstance {
+                param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
+
+                $processId = if ($Filter -match 'ProcessId=(\d+)') { [int]$Matches[1] } else { 0 }
+                if ($processId -eq $PID) {
+                    return [pscustomobject]@{
+                        ProcessId = $PID; ParentProcessId = 0; Name = 'powershell.exe'
+                        CommandLine = 'powershell.exe -File runner.ps1'; ExecutablePath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+                    }
+                }
+                return [pscustomobject]@{
+                    ProcessId = $processId; ParentProcessId = 2147483647; Name = 'node.exe'
+                    CommandLine = $expectedNodeCommand; ExecutablePath = 'C:\node\node.exe'
+                }
+            }
+            $unrelated = Get-DshServiceClassification -Port $fixture.Port `
+                -ExpectedEntrypoint $script:ExpectedEntrypoint `
+                -ExpectedStartupToken $script:ExpectedStartupToken -RunnerPid $PID
+            Assert-Equal 'UNHEALTHY' $unrelated.State `
+                'A live runner and an unrelated DSH-looking Node process must not establish one service identity'
+        } finally {
+            if ($priorScopedCimScriptBlock) {
+                Set-Item -LiteralPath Function:\Get-CimInstance -Value $priorScopedCimScriptBlock
+            } else {
+                Remove-Item -LiteralPath Function:\Get-CimInstance -ErrorAction SilentlyContinue
+            }
+            Stop-FakeHttpFixture -Fixture $fixture
+        }
+    }
+
+    Invoke-Test 'a mismatched current lock token cannot be combined with otherwise live service evidence' {
+        $launchRoot = Join-Path $testRoot 'mismatched-lock-token'
+        $lockRoot = Join-Path $launchRoot 'dsh-startup.lock'
+        New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
+        [IO.File]::WriteAllText(
+            (Join-Path $lockRoot 'identity.json'),
+            (@{ OwnerPid = $PID; Token = 'ffffffffffffffffffffffffffffffff' } | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $script:DshTestProcessInfo = [pscustomobject]@{
+            ProcessId = 4321; ParentProcessId = $PID; Name = 'node.exe'
+            CommandLine = $expectedNodeCommand; ExecutablePath = 'C:\node\node.exe'
+        }
+        $fixture = Start-FakeHttpFixture -Body '<div id="root"></div>' -StatusCode 200
+        try {
+            $mismatched = Get-DshServiceClassification -Port $fixture.Port `
+                -ExpectedEntrypoint $script:ExpectedEntrypoint `
+                -ExpectedStartupToken $script:ExpectedStartupToken -RunnerPid $PID -LaunchRoot $launchRoot
+            Assert-Equal 'UNHEALTHY' $mismatched.State `
+                'The token must be bound to the current runner lock rather than accepted as independent state evidence'
         } finally {
             Stop-FakeHttpFixture -Fixture $fixture
         }

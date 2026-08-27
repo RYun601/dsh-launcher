@@ -1,3 +1,5 @@
+param([string]$TestFilter = $env:DSH_TEST_FILTER)
+
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -33,6 +35,7 @@ function Assert-Match {
 function Invoke-Test {
     param([string]$Name, [scriptblock]$Body)
 
+    if ($TestFilter -and $Name -notmatch $TestFilter) { return }
     & $Body
     $script:Passed++
     Write-Host "PASS: $Name"
@@ -136,7 +139,7 @@ function New-TestClassification {
 }
 
 function Get-DshServiceClassification {
-    param([int]$Port, [string]$ExpectedEntrypoint, [string]$ExpectedStartupToken, [int]$RunnerPid)
+    param([int]$Port, [string]$ExpectedEntrypoint, [string]$ExpectedStartupToken, [int]$RunnerPid, [string]$LaunchRoot)
 
     Write-TestClassifierTrace -Kind 'CLASSIFY' -Port $Port -Entrypoint $ExpectedEntrypoint `
         -Token $ExpectedStartupToken -RunnerPid $RunnerPid -StableMilliseconds 0
@@ -149,6 +152,7 @@ function Wait-DshServiceIdentity {
         [string]$ExpectedEntrypoint,
         [string]$ExpectedStartupToken,
         [int]$RunnerPid,
+        [string]$LaunchRoot,
         [int]$StableMilliseconds,
         [int]$PollMilliseconds
     )
@@ -954,7 +958,7 @@ try {
         }
     }
 
-    Invoke-Test 'a new STARTING identity uses the stability wait before becoming READY' {
+    Invoke-Test 'status never promotes a new STARTING identity to READY before the readiness monitor owns the stable transition' {
         $launchRoot = Join-Path $testRoot 'starting-status-state'
         $startupToken = '66666666666666666666666666666666'
         $servicePid = 6543
@@ -989,14 +993,13 @@ try {
                     Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
             }
             Assert-Equal 0 $status.ExitCode "STARTING status should succeed. Output:`n$($status.Output)"
-            Assert-Match $status.Output "READY - PID $servicePid" 'A stable new identity may advance to READY'
-            $trace = @(Get-Content -LiteralPath $fixture.TracePath)
-            Assert-Equal 1 $trace.Count 'A STARTING identity should delegate stability to one wait operation'
-            Assert-Match $trace[0] "^WAIT\|31992\|$([regex]::Escape($entrypoint))\|$startupToken\|$($runner.Id)\|[1-9][0-9]*$" `
-                'A STARTING identity must use a positive stability window with stored evidence'
+            Assert-Match $status.Output "STARTING - PID $($runner.Id)" `
+                'Status may report an active startup, but the readiness monitor alone publishes the first READY state'
+            Assert-True (-not (Test-Path -LiteralPath $fixture.TracePath)) `
+                'Status must not use its short probe path to establish the first READY state'
             $state = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
-            Assert-Equal 'READY' $state.State 'Stable STARTING identity must be persisted as READY'
-            Assert-Equal $servicePid $state.ServicePid 'The stable service PID must be persisted'
+            Assert-Equal 'STARTING' $state.State 'Only the readiness monitor may persist the initial READY state'
+            Assert-Equal 0 $state.ServicePid 'Status must not pin a service PID before monitor stabilization completes'
         } finally {
             Remove-Item Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, `
                 Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue

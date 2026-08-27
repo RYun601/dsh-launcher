@@ -247,6 +247,31 @@ try {
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
     }
 
+    Invoke-Test 'explicit upgrade aborts without stopping the service when the target version cannot be resolved' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-unresolvable') `
+            -NpmLog (Join-Path $testRoot 'upgrade-unresolvable-npm.log') `
+            -ResolvedVersion ''
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture
+
+        Assert-Equal 1 $result.ExitCode "An unresolvable target version must abort the upgrade. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'aborted' 'The abort message must be explicit'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'The upgrade must not stop the service before resolving its target version'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'The upgrade must not restart startup when its target is unresolved'
+    }
+
+    Invoke-Test 'explicit upgrade aborts on a malformed resolved target version' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-malformed') `
+            -NpmLog (Join-Path $testRoot 'upgrade-malformed-npm.log') `
+            -ResolvedVersion 'not-a-semver!!'
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture
+
+        Assert-Equal 1 $result.ExitCode "A malformed target version must abort the upgrade. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'aborted' 'The abort message must be explicit'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'The upgrade must not stop the service for an invalid target version'
+    }
+
     Invoke-Test 'explicit upgrade fails fast when the local Node.js does not meet the requirement' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-old-node') `
             -NpmLog (Join-Path $testRoot 'upgrade-old-node-npm.log')
@@ -258,6 +283,7 @@ try {
         Assert-Match $result.Output '\^22\.19\.0' 'The error must state the required version range'
         Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'The upgrade must not stop the service on an unsupported Node.js'
     }
+
     Write-Host "All $script:Passed upgrade cache behavior tests passed."
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

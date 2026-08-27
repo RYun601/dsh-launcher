@@ -21,6 +21,10 @@ if (-not $RuntimeRoot.StartsWith($launchRootPrefix, [StringComparison]::OrdinalI
     throw "RuntimeRoot must be inside the launcher-owned directory: $launchRoot"
 }
 
+# Node.js 版本前置检查：准备或启动运行时之前失败，避免错误滞后且难以定位。
+. (Join-Path $PSScriptRoot 'dsh-node-version.ps1')
+if (-not (Assert-DshNodeEnvironment)) { exit 1 }
+
 $nodeModules = Join-Path $RuntimeRoot 'node_modules'
 $dshRoot = Join-Path (Join-Path $nodeModules '@deepseek-ai') 'dsh'
 $dshEntrypoint = Join-Path $dshRoot 'lib\bin.js'
@@ -183,64 +187,100 @@ try {
     }
 
     if (-not (Test-RuntimeReady)) {
+        # side-by-side 交换：把现有运行时整体改名保留（旧版本始终可回退），
+        # 在原来的路径上准备新版本；准备或验证任一步失败时改名回滚，
+        # 任何情况下都不删除尚可使用的旧运行时。
+        $retiredRoot = $null
+        $retiredVersion = ''
         if (-not (Test-RuntimeInstalledVersion)) {
             if (Test-Path -LiteralPath $RuntimeRoot) {
-                Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
+                try {
+                    $retiredVersion = [string](Get-Content -LiteralPath $readyMarker -Raw -Encoding UTF8 | ConvertFrom-Json).Version
+                } catch { }
+                $retiredRoot = Join-Path $launchRoot ('runtime-retired-' + [guid]::NewGuid().ToString('N'))
+                Rename-Item -LiteralPath $RuntimeRoot -NewName (Split-Path -Leaf $retiredRoot)
+                Write-Output "Preserved the previous runtime $retiredVersion at $retiredRoot until the new version is ready."
             }
-            New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
-
-            Write-Output "Preparing DeepSeek Harness runtime $Version..."
-            Invoke-NpmInstall -PackageSpecs @("@deepseek-ai/dsh@$Version")
         } else {
             Write-Output "Validating existing DeepSeek Harness runtime $Version..."
         }
 
-        $remainingPeers = $null
-        for ($round = 0; $round -lt 5; $round++) {
-            $remainingPeers = Get-MissingRequiredPeers
-            if ($remainingPeers.Count -eq 0) { break }
+        try {
+            if (-not (Test-RuntimeInstalledVersion)) {
+                New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
+                Write-Output "Preparing DeepSeek Harness runtime $Version..."
+                Invoke-NpmInstall -PackageSpecs @("@deepseek-ai/dsh@$Version")
+            }
 
-            $peerSpecs = @($remainingPeers.GetEnumerator() | Sort-Object Key | ForEach-Object {
-                $_.Key + '@' + $_.Value
-            })
-            Write-Output "Installing $($peerSpecs.Count) required DSH peer dependencies..."
-            Invoke-NpmInstall -PackageSpecs $peerSpecs
-
-            # Installation invalidates the scan that selected these peers.
             $remainingPeers = $null
-        }
+            for ($round = 0; $round -lt 5; $round++) {
+                $remainingPeers = Get-MissingRequiredPeers
+                if ($remainingPeers.Count -eq 0) { break }
 
-        if ($null -eq $remainingPeers) {
-            $remainingPeers = Get-MissingRequiredPeers
-        }
-        if ($remainingPeers.Count -gt 0) {
-            throw "DSH runtime is missing $($remainingPeers.Count) required peer dependencies after preparation"
-        }
-        if (-not (Test-Path -LiteralPath $dshEntrypoint)) {
-            throw "DSH entrypoint was not installed: $dshEntrypoint"
-        }
+                $peerSpecs = @($remainingPeers.GetEnumerator() | Sort-Object Key | ForEach-Object {
+                    $_.Key + '@' + $_.Value
+                })
+                Write-Output "Installing $($peerSpecs.Count) required DSH peer dependencies..."
+                Invoke-NpmInstall -PackageSpecs $peerSpecs
 
-        Write-Output 'Validating DSH runtime dependencies...'
-        $audit = Invoke-NpmDependencyAudit
-        if ($audit.ExitCode -ne 0 -and (Repair-KnownPeerConflict -Audit $audit)) {
+                # Installation invalidates the scan that selected these peers.
+                $remainingPeers = $null
+            }
+
+            if ($null -eq $remainingPeers) {
+                $remainingPeers = Get-MissingRequiredPeers
+            }
+            if ($remainingPeers.Count -gt 0) {
+                throw "DSH runtime is missing $($remainingPeers.Count) required peer dependencies after preparation"
+            }
+            if (-not (Test-Path -LiteralPath $dshEntrypoint)) {
+                throw "DSH entrypoint was not installed: $dshEntrypoint"
+            }
+
+            Write-Output 'Validating DSH runtime dependencies...'
             $audit = Invoke-NpmDependencyAudit
-        }
-        if ($audit.ExitCode -ne 0) { Write-AuditFailure -Audit $audit }
-        if (Test-Path -LiteralPath $auditLog) { Remove-Item -LiteralPath $auditLog -Force }
+            if ($audit.ExitCode -ne 0 -and (Repair-KnownPeerConflict -Audit $audit)) {
+                $audit = Invoke-NpmDependencyAudit
+            }
+            if ($audit.ExitCode -ne 0) { Write-AuditFailure -Audit $audit }
+            if (Test-Path -LiteralPath $auditLog) { Remove-Item -LiteralPath $auditLog -Force }
 
-        $marker = [ordered]@{
-            SchemaVersion = 2
-            Version = $Version
-            PreparedAt = (Get-Date).ToString('o')
-            ValidatedBy = 'npm-ls-all'
+            $marker = [ordered]@{
+                SchemaVersion = 2
+                Version = $Version
+                PreparedAt = (Get-Date).ToString('o')
+                ValidatedBy = 'npm-ls-all'
+            }
+            $temporaryMarker = Join-Path $RuntimeRoot ('dsh-runtime-ready-' + [guid]::NewGuid().ToString('N') + '.tmp')
+            [IO.File]::WriteAllText(
+                $temporaryMarker,
+                ($marker | ConvertTo-Json),
+                [Text.UTF8Encoding]::new($false)
+            )
+            Move-Item -LiteralPath $temporaryMarker -Destination $readyMarker -Force
+        } catch {
+            # 新版本未就绪：只要旧版本还被完整保留，就优先回滚，保证旧版本可再次启动。
+            if ($retiredRoot -and (Test-Path -LiteralPath $retiredRoot)) {
+                if (Test-Path -LiteralPath $RuntimeRoot) {
+                    try {
+                        Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force -ErrorAction Stop
+                    } catch {
+                        throw "Failed to roll back after preparation error; the previous runtime $retiredVersion is preserved at $retiredRoot and the partial tree remains at $RuntimeRoot."
+                    }
+                }
+                Rename-Item -LiteralPath $retiredRoot -NewName (Split-Path -Leaf $RuntimeRoot)
+                Write-Output "Preparation failed; the previous runtime $retiredVersion (upgrade aborted) was restored."
+            }
+            throw
         }
-        $temporaryMarker = Join-Path $RuntimeRoot ('dsh-runtime-ready-' + [guid]::NewGuid().ToString('N') + '.tmp')
-        [IO.File]::WriteAllText(
-            $temporaryMarker,
-            ($marker | ConvertTo-Json),
-            [Text.UTF8Encoding]::new($false)
-        )
-        Move-Item -LiteralPath $temporaryMarker -Destination $readyMarker -Force
+
+        if ($retiredRoot) {
+            try {
+                Remove-Item -LiteralPath $retiredRoot -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Output "Kept the retired previous runtime $retiredVersion at $retiredRoot (it can be deleted manually)."
+            }
+        }
     }
 
     if ($NoOpen -and $DshArguments -notcontains '--no-open') {

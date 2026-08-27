@@ -14,12 +14,26 @@ try {
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $dir 'dsh-version.ps1')
+. (Join-Path $dir 'dsh-node-version.ps1')
 
-# 0) 目标版本 = 各 dist-tag（latest/next/...）中的最高者（当前 next=0.1.0-rc.8）
+# 0) Node.js 版本前置检查：不满足要求时直接失败，不触碰正在运行的服务。
+if (-not (Assert-DshNodeEnvironment)) { exit 1 }
+
+# 1) 目标版本 = 各 dist-tag（latest/next/...）中的最高者（当前 next=0.1.0-rc.8）。
+#    必须先成功解析并校验版本，才允许停止服务或清理任何东西。
 $latest = & (Join-Path $dir 'resolve-dsh-version.ps1')
-if ($latest) { Write-Host "目标版本：$latest" }
+if (-not $latest) {
+    Write-Host '[ERROR] 无法解析目标 DSH 版本，升级已取消（upgrade aborted）；当前安装未被更改。'
+    exit 1
+}
+$targetVersion = [string]$latest
+if (-not (ConvertTo-DshSemVer $targetVersion)) {
+    Write-Host "[ERROR] 解析到的目标版本无效：$targetVersion，升级已取消（upgrade aborted）；当前安装未被更改。"
+    exit 1
+}
+Write-Host "目标版本：$targetVersion"
 
-# 1) 停止服务（stop-dsh.ps1 内含误杀防护）
+# 2) 停止服务（stop-dsh.ps1 内含误杀防护）
 Write-Host '正在停止服务...'
 & (Join-Path $dir 'stop-dsh.ps1')
 

@@ -158,11 +158,25 @@ function global:Get-NetTCPConnection {
 function global:Get-CimInstance {
     param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
     return [pscustomobject]@{
+        ProcessId = 4321
+        ParentProcessId = $PID
         Name = 'node.exe'
         CommandLine = 'node.exe "' + $Entrypoint + '" web'
         ExecutablePath = 'C:\node\node.exe'
     }
 }
+
+$env:DSH_TEST_MODE = '1'
+$lockRoot = Join-Path $LaunchRoot 'dsh-startup.lock'
+New-Item -ItemType Directory -Force -Path $lockRoot | Out-Null
+$identity = [ordered]@{
+    OwnerPid = $PID
+    Token = $StartupToken
+    CommandPath = $PSHOME + '\\powershell.exe'
+    ScriptPath = $MonitorScript
+    CreatedAt = [DateTime]::UtcNow.ToString('o')
+}
+[IO.File]::WriteAllText((Join-Path $lockRoot 'identity.json'), ($identity | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 
 function global:Start-Process {
     param([Parameter(Position = 0)][string]$FilePath)

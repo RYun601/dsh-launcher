@@ -8,6 +8,7 @@ param(
         'WriteStartupState',
         'RecordStartupExit',
         'GetStartupState',
+        'GetStartupSnapshot',
         'GetStatus'
     )]
     [string]$Action,
@@ -698,20 +699,15 @@ function Write-Status {
         $hasStartupEvidence = $startupState -and $startupState.Entrypoint -and
             $startupState.StartupToken -and $runnerPid -gt 0
         $startingLockMatchesState = Test-StatusLockMatchesState -Snapshot $snapshot
-        if ($hasStartupEvidence -and ($startupState.State -eq 'READY' -or $startingLockMatchesState)) {
+        if ($hasStartupEvidence -and $startupState.State -eq 'READY') {
             if ($startupState.State -eq 'READY') {
                 $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
                 if ($recordedServicePid -gt 0) {
                     $classification = Get-DshServiceClassification -Port $ServicePort `
                         -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
                         -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                        -RunnerPid $runnerPid
+                        -RunnerPid $runnerPid -LaunchRoot $Paths.Root
                 }
-            } else {
-                $classification = Wait-DshServiceIdentity -Port $ServicePort `
-                    -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
-                    -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                    -RunnerPid $runnerPid -StableMilliseconds 250 -PollMilliseconds 50
             }
         }
 
@@ -738,14 +734,6 @@ function Write-Status {
                 return
             }
             if ($classification -and $classification.State -eq 'READY') {
-                if ($startupState.State -eq 'STARTING') {
-                    Write-StartupStateFile -Paths $Paths -NewState 'READY' `
-                        -NewOwnerPid $runnerPid -NewServicePid ([int]$classification.ServicePid) `
-                        -NewVersion ([string]$startupState.Version) -NewMessage ([string]$classification.Message) `
-                        -NewExitCode 0 -NewStartupToken ([string]$startupState.StartupToken) `
-                        -NewRuntimeRoot ([string]$startupState.RuntimeRoot) `
-                        -NewEntrypoint ([string]$startupState.Entrypoint)
-                }
                 Write-Output "READY - PID $($classification.ServicePid)"
                 return
             }
@@ -911,6 +899,17 @@ switch ($Action) {
         $startupState = Read-StartupState -Paths $paths
         if ($startupState) {
             Write-Output ($startupState | ConvertTo-Json -Depth 3 -Compress)
+        }
+    }
+
+    'GetStartupSnapshot' {
+        $paths = Get-StartupPaths -Root (Get-LaunchRoot)
+        $guard = Enter-StartupLockGuard -Paths $paths
+        try {
+            $snapshot = Get-StartupStatusSnapshot -Paths $paths
+            Write-Output ($snapshot | ConvertTo-Json -Depth 4 -Compress)
+        } finally {
+            Exit-StartupLockGuard -Guard $guard
         }
     }
 

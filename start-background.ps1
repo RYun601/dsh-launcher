@@ -10,6 +10,10 @@
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Port -ne 3080 -and $env:DSH_TEST_MODE -ne '1') {
+    Write-Host '[ERROR] Production lifecycle startup only supports port 3080. Set DSH_TEST_MODE=1 only for isolated tests.'
+    exit 1
+}
 # —— 控制台编码修复 ——
 # 在代码页被切到 UTF-8(65001) 的传统控制台里，中文输出会出现“每个字重复”的重影 bug。
 # 这里把控制台代码页与输出编码统一回系统 ANSI 代码页（中文系统为 936/GBK）。
@@ -56,6 +60,30 @@ function Get-DshStartupState {
     return $null
 }
 
+function Get-DshAttachedStartupSnapshot {
+    try {
+        $snapshotJson = [string](@(& $stateHelper -Action GetStartupSnapshot -LaunchRoot $launchRoot) -join '')
+        if ($snapshotJson) { return $snapshotJson | ConvertFrom-Json }
+    } catch { }
+    return $null
+}
+
+function Test-DshAttachedStartupIdentity {
+    param([object]$Snapshot)
+
+    if (-not $Snapshot -or -not $Snapshot.LockIsLive -or -not $Snapshot.Lock -or -not $Snapshot.StartupState) {
+        return $false
+    }
+    $state = $Snapshot.StartupState
+    $lock = $Snapshot.Lock
+    if ($state.State -ne 'STARTING' -or -not $state.StartupToken -or -not $state.RuntimeRoot -or -not $state.Entrypoint) {
+        return $false
+    }
+    $stateRunnerPid = if ($state.RunnerPid) { [int]$state.RunnerPid } elseif ($state.Pid) { [int]$state.Pid } else { 0 }
+    return $stateRunnerPid -gt 0 -and $stateRunnerPid -eq [int]$lock.OwnerPid -and
+        [string]::Equals([string]$state.StartupToken, [string]$lock.Token, [StringComparison]::Ordinal)
+}
+
 function ConvertTo-StartupPhaseDisplay {
     param([Parameter(Mandatory = $true)][string]$Identifier)
 
@@ -93,8 +121,8 @@ function Wait-DshStartup {
             $classification = Wait-DshServiceIdentity -Port $Port `
                 -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
                 -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                -RunnerPid ([int]$startupState.RunnerPid) `
-                -StableMilliseconds 250 -PollMilliseconds 50
+                -RunnerPid ([int]$startupState.RunnerPid) -LaunchRoot $launchRoot `
+                -StableMilliseconds 5000 -PollMilliseconds 200
             if ($classification.State -eq 'READY') {
                 Write-Host "DeepSeek Harness 服务已就绪（PID $($classification.ServicePid)）"
                 Write-Host '查看状态：deepseek --status'
@@ -151,6 +179,12 @@ if ($LASTEXITCODE -ne 0) {
 $lockText = [string]($lockStatus -join [Environment]::NewLine)
 if ($lockText -match '^LOCKED\s+(\d+)') {
     $existingOwnerPid = [int]$Matches[1]
+    $attachedSnapshot = Get-DshAttachedStartupSnapshot
+    if (-not (Test-DshAttachedStartupIdentity -Snapshot $attachedSnapshot) -or
+            [int]$attachedSnapshot.Lock.OwnerPid -ne $existingOwnerPid) {
+        Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
+        exit 1
+    }
     Write-Host "DeepSeek Harness 已在启动中（PID $existingOwnerPid），未重复提交启动任务"
     Write-Host "查看状态：deepseek --status"
     Write-Host "查看日志：deepseek --logs"
@@ -178,7 +212,7 @@ $existingRunnerPid = if ($existingState -and $existingState.RunnerPid) {
     0
 }
 $existing = Get-DshServiceClassification -Port $Port -ExpectedEntrypoint $existingEntrypoint `
-    -ExpectedStartupToken $existingToken -RunnerPid $existingRunnerPid
+    -ExpectedStartupToken $existingToken -RunnerPid $existingRunnerPid -LaunchRoot $launchRoot
 if ($existing.State -eq 'READY') {
     Write-Host "[REUSE] 端口 $Port 已有 DeepSeek Harness 实例在运行（PID $($existing.ServicePid)），无需重复启动"
     Write-Host '正在打开浏览器...'
@@ -212,6 +246,12 @@ $initialReservation = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $l
     -ScriptPath $coordinatorScriptPath)
 if ($LASTEXITCODE -eq 2) {
     $owner = ([string]($initialReservation -join [Environment]::NewLine) -replace '^LOCKED\s*', '').Trim()
+    $attachedSnapshot = Get-DshAttachedStartupSnapshot
+    if (-not (Test-DshAttachedStartupIdentity -Snapshot $attachedSnapshot) -or
+            -not ($owner -match '^\d+$') -or [int]$attachedSnapshot.Lock.OwnerPid -ne [int]$owner) {
+        Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
+        exit 1
+    }
     Write-Host "DeepSeek Harness 已在启动中（PID $owner），未重复提交启动任务"
     if ($WaitForReady -and $owner -match '^\d+$') {
         exit (Wait-DshStartup -OwnerPid ([int]$owner))
@@ -267,6 +307,12 @@ $reservation = @(& $stateHelper -Action AcquireStartupLock -LaunchRoot $launchRo
 if ($LASTEXITCODE -eq 2) {
     [IO.File]::WriteAllText($gatePath, 'CANCEL', [Text.Encoding]::ASCII)
     $owner = ([string]($reservation -join [Environment]::NewLine) -replace '^LOCKED\s*', '').Trim()
+    $attachedSnapshot = Get-DshAttachedStartupSnapshot
+    if (-not (Test-DshAttachedStartupIdentity -Snapshot $attachedSnapshot) -or
+            -not ($owner -match '^\d+$') -or [int]$attachedSnapshot.Lock.OwnerPid -ne [int]$owner) {
+        Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
+        exit 1
+    }
     Write-Host "DeepSeek Harness 已在启动中（PID $owner），未重复提交启动任务"
     Write-Host '查看状态：deepseek --status'
     Write-Host '查看日志：deepseek --logs'

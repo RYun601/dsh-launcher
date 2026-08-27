@@ -3,6 +3,7 @@ param([string]$TestFilter = $env:DSH_TEST_FILTER)
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$env:DSH_TEST_MODE = '1'
 $startScript = Join-Path $repoRoot 'start-background.ps1'
 $foregroundScript = Join-Path $repoRoot 'start-foreground.ps1'
 $startCommand = Join-Path $repoRoot 'start-background.cmd'
@@ -314,6 +315,7 @@ function Invoke-ReservedRealBackgroundRunner {
     $launchRoot = Join-Path $profilePath 'dsh-launch'
     $fakeBin = Join-Path $scenarioRoot 'fake-bin'
     $startupToken = [guid]::NewGuid().ToString('N')
+    $port = Get-FreeTcpPort
     $gatePath = Join-Path $launchRoot ("startup-$startupToken.gate")
     New-Item -ItemType Directory -Force -Path $profilePath, $fakeBin | Out-Null
 
@@ -360,7 +362,7 @@ function Invoke-ReservedRealBackgroundRunner {
         '-StartupToken', $startupToken,
         '-RuntimeRoot', "`"$runtimeRoot`"",
         '-Entrypoint', "`"$dshEntrypoint`"",
-        '-Port', '3080',
+        '-Port', [string]$port,
         '-CoordinatorGate', "`"$gatePath`"",
         '-TimeoutSeconds', '10'
     )
@@ -462,6 +464,7 @@ function Invoke-ReservedRealBackgroundRunner {
         StartupToken = $startupToken
         RuntimeRoot = $runtimeRoot
         Entrypoint = $dshEntrypoint
+        Port = $port
         StateDuringRun = $state
         LockIdentityDuringRun = $lockIdentityDuringRun
         StartupMessages = @($startupMessages)
@@ -583,6 +586,7 @@ function Invoke-ForegroundForeignScenario {
     $harness = @'
 param([string]$ForegroundScript, [string]$LaunchRoot, [string]$EventsPath)
 $ErrorActionPreference = 'Stop'
+$env:DSH_TEST_MODE = '1'
 function global:Get-NetTCPConnection {
     param([int]$LocalPort, [string]$State, [object]$ErrorAction)
     return [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = $LocalPort; OwningProcess = 4242 }
@@ -613,6 +617,7 @@ exit $LASTEXITCODE
     $startInfo.RedirectStandardOutput = $true
     $startInfo.RedirectStandardError = $true
     $startInfo.EnvironmentVariables['USERPROFILE'] = $profilePath
+    $startInfo.EnvironmentVariables['DSH_TEST_MODE'] = '1'
     $startInfo.EnvironmentVariables['PATH'] = "$fakeBin;$env:PATH"
     $process = [Diagnostics.Process]::Start($startInfo)
     Assert-True ($process.WaitForExit(5000)) 'Foreground foreign-port scenario did not return promptly'
@@ -696,6 +701,26 @@ try {
         Assert-Match $foreign.Output 'FOREIGN_PORT' 'Foreground refusal must name the shared classifier state'
         Assert-NotMatch $foreign.Events 'START .*open-when-ready\.ps1|OPEN http://|NODE ' `
             'Foreground rejection must not start a monitor, browser, or run-dsh runtime'
+    }
+
+    Invoke-Test 'production lifecycle entrypoints reject isolated ports unless explicit test mode is enabled' {
+        $profilePath = Join-Path $testRoot 'production-port-guard-profile'
+        $isolatedPort = Get-FreeTcpPort
+        New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell.exe'
+        $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $foregroundScript + '" -LaunchRoot "' +
+            (Join-Path $profilePath 'dsh-launch') + '" -Version 0.1.0-rc.8 -Port ' + $isolatedPort
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables['USERPROFILE'] = $profilePath
+        $startInfo.EnvironmentVariables.Remove('DSH_TEST_MODE')
+        $process = [Diagnostics.Process]::Start($startInfo)
+        Assert-True $process.WaitForExit(5000) 'Production port guard should fail before any lifecycle work starts'
+        $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+        Assert-Equal 1 $process.ExitCode 'Production lifecycle scripts must reject non-3080 ports'
+        Assert-Match $output 'only supports port 3080' 'The port guard must give an explicit production-only diagnostic'
     }
 
     Invoke-Test 'DSH-identified healthy occupant is reused and the browser is opened once' {
@@ -800,7 +825,7 @@ try {
         Assert-Match $result.MonitorCommandLine ([regex]::Escape("-StartupToken $($result.StartupToken)")) 'The monitor must receive the runner startup token'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-RuntimeRoot "' + $result.RuntimeRoot + '"')) 'The monitor must receive the selected runtime root'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Entrypoint "' + $result.Entrypoint + '"')) 'The monitor must receive the exact entrypoint'
-        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Port 3080')) 'The monitor must classify the selected service port'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Port ' + $result.Port)) 'The monitor must classify the isolated test service port'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-StableMilliseconds 5000')) 'The monitor must require a stable identity window'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-PollIntervalMilliseconds 200')) 'The runner must use the 200 ms readiness interval'
         Assert-Equal $result.StartupToken ([string]$result.StateDuringRun.StartupToken) 'Runner state must retain the coordinator token'

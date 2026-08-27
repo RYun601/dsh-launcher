@@ -22,6 +22,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Port -ne 3080 -and $env:DSH_TEST_MODE -ne '1') {
+    Write-Host '[ERROR] Production lifecycle startup only supports port 3080. Set DSH_TEST_MODE=1 only for isolated tests.'
+    exit 1
+}
 $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
 $runScript = Join-Path $PSScriptRoot 'run-dsh.ps1'
 $monitorScript = Join-Path $PSScriptRoot 'open-when-ready.ps1'

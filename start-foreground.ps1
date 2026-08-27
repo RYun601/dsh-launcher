@@ -8,6 +8,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Port -ne 3080 -and $env:DSH_TEST_MODE -ne '1') {
+    Write-Host '[ERROR] Production lifecycle startup only supports port 3080. Set DSH_TEST_MODE=1 only for isolated tests.'
+    exit 1
+}
 $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
 $healthHelper = Join-Path $PSScriptRoot 'dsh-service-health.ps1'
 $monitorScript = Join-Path $PSScriptRoot 'open-when-ready.ps1'
@@ -51,7 +55,7 @@ $expectedRunnerPid = if ($existingState -and $existingState.RunnerPid) {
     0
 }
 $existing = Get-DshServiceClassification -Port $Port -ExpectedEntrypoint $expectedEntrypoint `
-    -ExpectedStartupToken $expectedToken -RunnerPid $expectedRunnerPid
+    -ExpectedStartupToken $expectedToken -RunnerPid $expectedRunnerPid -LaunchRoot $LaunchRoot
 if ($existing.State -eq 'READY') {
     Write-Host "[REUSE] DeepSeek Harness is already ready (PID $($existing.ServicePid))."
     Start-Process $url

@@ -162,6 +162,54 @@ function Test-DshProcessIdentity {
         -ExpectedPath $ExpectedEntrypoint
 }
 
+function Test-DshServiceDescendsFromRunner {
+    param(
+        [Parameter(Mandatory = $true)][int]$ServicePid,
+        [Parameter(Mandatory = $true)][int]$RunnerPid
+    )
+
+    if ($ServicePid -le 0 -or $RunnerPid -le 0 -or $ServicePid -eq $RunnerPid) {
+        return $false
+    }
+
+    $currentPid = $ServicePid
+    $visited = @{}
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if ($visited.ContainsKey($currentPid)) { return $false }
+        $visited[$currentPid] = $true
+        try {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop
+        } catch {
+            return $false
+        }
+        if (-not $process -or $null -eq $process.ParentProcessId) { return $false }
+        $parentPid = [int]$process.ParentProcessId
+        if ($parentPid -eq $RunnerPid) { return $true }
+        if ($parentPid -le 0) { return $false }
+        $currentPid = $parentPid
+    }
+    return $false
+}
+
+function Test-DshStartupLockIdentity {
+    param(
+        [string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedStartupToken,
+        [Parameter(Mandatory = $true)][int]$RunnerPid
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return $true }
+    $identityPath = Join-Path (Join-Path $LaunchRoot 'dsh-startup.lock') 'identity.json'
+    try {
+        if (-not (Test-Path -LiteralPath $identityPath)) { return $false }
+        $identity = Get-Content -LiteralPath $identityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [int]$identity.OwnerPid -eq $RunnerPid -and
+            [string]::Equals([string]$identity.Token, $ExpectedStartupToken, [StringComparison]::Ordinal)
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-DshHttpProbe {
     param(
         [Parameter(Mandatory = $true)]
@@ -271,7 +319,8 @@ function Get-DshServiceClassification {
         [int]$Port,
         [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint,
         [string]$ExpectedStartupToken,
-        [int]$RunnerPid
+        [int]$RunnerPid,
+        [string]$LaunchRoot
     )
 
     try {
@@ -298,6 +347,11 @@ function Get-DshServiceClassification {
             -Message 'The DeepSeek Harness listener has no startup token evidence' `
             -HttpStatus $null -Entrypoint $entrypoint
     }
+    if (-not (Test-DshStartupLockIdentity -LaunchRoot $LaunchRoot -ExpectedStartupToken $ExpectedStartupToken -RunnerPid $RunnerPid)) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The startup token is not bound to the current runner lock identity' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
 
     $runner = if ($RunnerPid -gt 0) {
         Get-Process -Id $RunnerPid -ErrorAction SilentlyContinue
@@ -307,6 +361,11 @@ function Get-DshServiceClassification {
     if (-not $runner) {
         return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
             -Message 'The DeepSeek Harness listener has no live runner evidence' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+    if (-not (Test-DshServiceDescendsFromRunner -ServicePid $servicePid -RunnerPid $RunnerPid)) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The DeepSeek Harness listener is not a descendant of the expected runner' `
             -HttpStatus $null -Entrypoint $entrypoint
     }
 
@@ -329,6 +388,7 @@ function Wait-DshServiceIdentity {
         [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint,
         [string]$ExpectedStartupToken,
         [int]$RunnerPid,
+        [string]$LaunchRoot,
         [ValidateRange(0, 60000)]
         [int]$StableMilliseconds = 0,
         [ValidateRange(1, 60000)]
@@ -340,7 +400,7 @@ function Wait-DshServiceIdentity {
     while ($true) {
         $classification = Get-DshServiceClassification -Port $Port `
             -ExpectedEntrypoint $ExpectedEntrypoint -ExpectedStartupToken $ExpectedStartupToken `
-            -RunnerPid $RunnerPid
+            -RunnerPid $RunnerPid -LaunchRoot $LaunchRoot
         if ($classification.State -ne 'READY') {
             return $classification
         }

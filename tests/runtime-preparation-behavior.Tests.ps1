@@ -114,6 +114,27 @@ function Invoke-UnsafeRuntime {
     }
 }
 
+function New-FakeReadyRuntime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$DshVersion
+    )
+
+    $dshRoot = Join-Path (Join-Path (Join-Path $Root 'node_modules') '@deepseek-ai') 'dsh'
+    New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), '// fake dsh', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText(
+        (Join-Path $dshRoot 'package.json'),
+        (@{ name = '@deepseek-ai/dsh'; version = $DshVersion } | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $Root 'dsh-runtime-ready.json'),
+        (@{ SchemaVersion = 2; Version = $DshVersion; ValidatedBy = 'npm-ls-all' } | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 New-Item -ItemType Directory -Force -Path $testRoot, $fakeBin | Out-Null
 try {
     $runtimeHarnessScript = @'
@@ -138,6 +159,10 @@ exit $LASTEXITCODE
 param([Parameter(ValueFromRemainingArguments = $true)][string[]]$NpmArguments)
 $ErrorActionPreference = 'Stop'
 [IO.File]::AppendAllText($env:DSH_TEST_NPM_LOG, ($NpmArguments -join ' ') + [Environment]::NewLine)
+if ($env:DSH_TEST_PEER_MODE -eq 'install-fails' -and $NpmArguments[0] -eq 'install') {
+    [Console]::Error.WriteLine('npm error simulated install failure')
+    exit 1
+}
 $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
     $runtimeRoot = $NpmArguments[$prefixIndex + 1]
     $modules = Join-Path $runtimeRoot 'node_modules\@deepseek-ai'
@@ -337,14 +362,6 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         Assert-Equal $true (Test-Path -LiteralPath $sentinel) 'Rejecting an unsafe root must not delete its existing files'
     }
 
-    Write-Host "All $script:Passed runtime preparation behavior tests passed."
-} finally {
-    if (Test-Path -LiteralPath $testRoot) {
-        Remove-Item -LiteralPath $testRoot -Recurse -Force
-    }
-}
-
-exit 0
     Invoke-Test 'rejects unsupported Node versions before preparing the runtime' {
         $npmLogStart = if (Test-Path -LiteralPath $npmLog) { (Get-Item -LiteralPath $npmLog).Length } else { 0 }
         $rejectedRoot = Join-Path $profileRoot 'dsh-launch\runtime-node-rejected'
@@ -365,3 +382,46 @@ exit 0
         Assert-Equal $false (Test-Path -LiteralPath (Join-Path $rejectedRoot 'dsh-runtime-ready.json')) `
             'A rejected Node.js environment must not mark any runtime ready'
     }
+
+    Invoke-Test 'restores the previous runtime when a replacement version fails to prepare' {
+        $swapFailRoot = Join-Path $profileRoot 'dsh-launch\runtime-swap-fail'
+        New-FakeReadyRuntime -Root $swapFailRoot -DshVersion '0.1.0-rc.7'
+        $launchDir = Split-Path -Parent $swapFailRoot
+
+        $result = Invoke-Runtime -SelectedRuntimeRoot $swapFailRoot -PeerMode 'install-fails'
+        Assert-Equal 1 $result.ExitCode 'A failed replacement preparation must fail the launch'
+        Assert-Match $result.Output '0\.1\.0-rc\.7' 'The failure output should mention that the previous runtime was preserved'
+
+        Assert-Equal $true (Test-Path -LiteralPath (Join-Path $swapFailRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js')) `
+            'The previous runtime entrypoint must remain startable after a failed swap'
+        $marker = Get-Content -LiteralPath (Join-Path $swapFailRoot 'dsh-runtime-ready.json') -Raw | ConvertFrom-Json
+        Assert-Equal '0.1.0-rc.7' $marker.Version 'The restored runtime must still be the previous validated version'
+        $leftovers = @(Get-ChildItem -LiteralPath $launchDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^runtime-retired-|^runtime-staging-' })
+        Assert-Equal 0 $leftovers.Count 'A failed swap must not leave retired or staging directories behind'
+    }
+
+    Invoke-Test 'replaces an older installed runtime only after full validation succeeds' {
+        $swapOkRoot = Join-Path $profileRoot 'dsh-launch\runtime-swap-ok'
+        New-FakeReadyRuntime -Root $swapOkRoot -DshVersion '0.1.0-rc.7'
+        $launchDir = Split-Path -Parent $swapOkRoot
+
+        $result = Invoke-Runtime -SelectedRuntimeRoot $swapOkRoot
+        Assert-Equal 0 $result.ExitCode "A successful replacement must launch. Output:`n$($result.Output)"
+        $marker = Get-Content -LiteralPath (Join-Path $swapOkRoot 'dsh-runtime-ready.json') -Raw | ConvertFrom-Json
+        Assert-Equal '0.1.0-rc.8' $marker.Version 'Only a fully validated new version may become the active runtime'
+        Assert-Equal $true (Test-Path -LiteralPath (Join-Path $swapOkRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js')) `
+            'The swapped-in runtime must contain the DSH entrypoint'
+        $leftovers = @(Get-ChildItem -LiteralPath $launchDir -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^runtime-retired-|^runtime-staging-' })
+        Assert-Equal 0 $leftovers.Count 'A successful swap must clean up its side-by-side directories'
+    }
+
+    Write-Host "All $script:Passed runtime preparation behavior tests passed."
+} finally {
+    if (Test-Path -LiteralPath $testRoot) {
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
+}
+
+exit 0

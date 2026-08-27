@@ -24,6 +24,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $env:USERPROFILE = $ProfilePath
+$env:DSH_TEST_MODE = '1'
 $global:DshTestScenario = $Scenario
 $global:DshTestPortChecks = 0
 $global:DshTestProcessLogPath = $ProcessLogPath
@@ -113,7 +114,14 @@ function global:Get-CimInstance {
             ExecutablePath = 'C:\apps\other-server.exe'
         }
     }
+    $serviceParentPid = if ($global:DshTestScenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
+        $PID
+    } else {
+        $global:DshTestRunnerPid
+    }
     return [pscustomobject]@{
+        ProcessId = $processId
+        ParentProcessId = $serviceParentPid
         Name = 'node.exe'
         CommandLine = 'node.exe "' + (Join-Path $dshRoot 'lib\bin.js') + '" web'
         ExecutablePath = 'C:\node\node.exe'
@@ -210,9 +218,14 @@ if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
     )
     Set-Content -LiteralPath (Join-Path $lockDirectory 'created-at.txt') `
         -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
+    [IO.File]::WriteAllText(
+        (Join-Path $lockDirectory 'identity.json'),
+        (@{ OwnerPid = $PID; Token = $testStartupToken; CommandPath = (Join-Path $PSHOME 'powershell.exe'); ScriptPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path); CreatedAt = [DateTime]::UtcNow.ToString('o') } | ConvertTo-Json -Compress),
+        [Text.UTF8Encoding]::new($false)
+    )
 }
 
-if ($Scenario -in @('DuplicateReady', 'OccupiedReady', 'OccupiedUnhealthy')) {
+if ($Scenario -in @('Duplicate', 'DuplicateReady', 'OccupiedReady', 'OccupiedUnhealthy')) {
     $statePath = Join-Path $ProfilePath 'dsh-launch\dsh-startup.json'
     $state = [ordered]@{
         State = if ($Scenario -eq 'OccupiedReady') { 'READY' } else { 'STARTING' }
