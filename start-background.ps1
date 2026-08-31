@@ -3,6 +3,7 @@
     [ValidateRange(1, 86400)]
     [int]$TimeoutSeconds = 900,
     [string]$Version,
+    [string]$RuntimeRoot,
     [ValidateRange(1, 65535)]
     [int]$Port = 3080,
     [ValidateRange(1, 3600)]
@@ -33,13 +34,27 @@ $launchRoot = Join-Path $env:USERPROFILE 'dsh-launch'
 $log = Join-Path $launchRoot 'dsh-background.log'
 $stateHelper = Join-Path $dir 'dsh-launch-state.ps1'
 $healthHelper = Join-Path $dir 'dsh-service-health.ps1'
-$runtimeRoot = Join-Path $launchRoot 'runtime'
+if (-not $RuntimeRoot) { $RuntimeRoot = Join-Path $launchRoot 'runtime' }
+$runtimeRoot = $RuntimeRoot
 $entrypoint = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 $coordinatorCommandPath = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
 $coordinatorScriptPath = [IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)
 $url = "http://127.0.0.1:$Port"
 New-Item -ItemType Directory -Force -Path (Split-Path $log -Parent) | Out-Null
 . $healthHelper
+. (Join-Path $dir 'dsh-runtime-layout.ps1')
+
+if (-not $PSBoundParameters.ContainsKey('RuntimeRoot')) {
+    try {
+        $runtimeLayout = Get-DshRuntimeLayout -LaunchRoot $launchRoot
+        $runtimePointer = Initialize-DshRuntimePointer -Layout $runtimeLayout
+        if ($runtimePointer.Current -and (Test-DshRuntimeReady -Path $runtimePointer.Current.Path -ExpectedVersion $runtimePointer.Current.Version)) {
+            $runtimeRoot = $runtimePointer.Current.Path
+            $entrypoint = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+            if (-not $Version) { $Version = $runtimePointer.Current.Version }
+        }
+    } catch { }
+}
 
 function Write-StartupFailure {
     param([string]$Message)

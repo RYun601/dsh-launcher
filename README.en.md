@@ -105,13 +105,13 @@ After completing the installation above (any option) and opening a **new** termi
 | `deepseek` | Foreground mode (default): shows logs in a window; close the window or press Ctrl+C to stop |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | Background mode: returns immediately while the service keeps starting; browser opens automatically when ready |
 | `deepseek --status` | Show service state (`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`); `STARTING` covers download/install and `FAILED` includes the log path |
-| `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart |
+| `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart; a failed kill or wait timeout fails loudly with a nonzero exit code |
 | `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
 | `deepseek --version` | Show launcher version and local DeepSeek Harness version |
 | `deepseek --update` | Compare the local version with the latest on npm and show how to update |
 | `deepseek --upgrade` | One-click upgrade: resolve and validate the target version first (aborts without stopping the service on failure), then stop the service, clear old DSH npx workspaces, sync the global `dsh` command, and restart in background |
 | `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
-| `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation; stops the service first, moves directories to a backup before deletion, and keeps the backup with its location if cleanup fails) |
+| `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation — cancelling changes nothing; stops the service first, moves directories to a backup before deletion; PATH is removed only after every directory is safely backed up; the install dir is validated against its ownership marker, and a failed cleanup keeps the backup with its location) |
 | `deepseek --check` | Environment self-check (script path / npm / port) |
 | `deepseek --help` | Show help |
 

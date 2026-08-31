@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $runtimeScript = Join-Path $repoRoot 'run-dsh.ps1'
@@ -15,6 +15,11 @@ $script:Passed = 0
 function Assert-Equal {
     param($Expected, $Actual, [string]$Message)
     if ($Expected -ne $Actual) { throw "$Message (expected: $Expected, actual: $Actual)" }
+}
+
+function Assert-True {
+    param([bool]$Condition, [string]$Message)
+    if (-not $Condition) { throw $Message }
 }
 
 function Assert-Match {
@@ -40,6 +45,7 @@ function Invoke-Runtime {
         [string]$PeerMode = '',
         [switch]$TrackPeerScans,
         [switch]$NoOpen,
+        [switch]$PrepareOnly,
         [string]$NodeVersion = ''
     )
 
@@ -67,6 +73,7 @@ function Invoke-Runtime {
             @('-Version', '0.1.0-rc.8', '-RuntimeRoot', $SelectedRuntimeRoot, '-DshArguments', 'web')
         }
         if ($NoOpen) { $scriptArguments += '-NoOpen' }
+        if ($PrepareOnly) { $scriptArguments += '-PrepareOnly' }
         $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptPath @scriptArguments 2>&1
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
@@ -289,6 +296,15 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         Assert-Equal 1 ([regex]::Matches($nodeCall, '--no-open').Count) 'DSH must receive --no-open exactly once'
     }
 
+    Invoke-Test 'PrepareOnly validates a candidate without executing Node' {
+        $candidateRoot = Join-Path $profileRoot 'dsh-launch\runtime-candidate'
+        [IO.File]::WriteAllText($nodeLog, '', [Text.Encoding]::ASCII)
+        $result = Invoke-Runtime -SelectedRuntimeRoot $candidateRoot -PrepareOnly
+        Assert-Equal 0 $result.ExitCode "PrepareOnly should succeed. Output:`n$($result.Output)"
+        Assert-Equal '' ([IO.File]::ReadAllText($nodeLog)) 'PrepareOnly must not execute Node'
+        Assert-True (Test-Path -LiteralPath (Join-Path $candidateRoot 'dsh-runtime-ready.json')) 'PrepareOnly must write the ready marker'
+    }
+
     Invoke-Test 'repairs the known React 19 peer conflict before marking the runtime ready' {
         $conflictRuntime = Join-Path $profileRoot 'dsh-launch\runtime-react-conflict'
         $logStart = if (Test-Path -LiteralPath $npmLog) { (Get-Item -LiteralPath $npmLog).Length } else { 0 }
@@ -390,15 +406,14 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
 
         $result = Invoke-Runtime -SelectedRuntimeRoot $swapFailRoot -PeerMode 'install-fails'
         Assert-Equal 1 $result.ExitCode 'A failed replacement preparation must fail the launch'
-        Assert-Match $result.Output '0\.1\.0-rc\.7' 'The failure output should mention that the previous runtime was preserved'
 
         Assert-Equal $true (Test-Path -LiteralPath (Join-Path $swapFailRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js')) `
-            'The previous runtime entrypoint must remain startable after a failed swap'
+            'A failed candidate preparation must not remove the existing runtime entrypoint'
         $marker = Get-Content -LiteralPath (Join-Path $swapFailRoot 'dsh-runtime-ready.json') -Raw | ConvertFrom-Json
-        Assert-Equal '0.1.0-rc.7' $marker.Version 'The restored runtime must still be the previous validated version'
+        Assert-Equal '0.1.0-rc.7' $marker.Version 'The existing runtime marker must remain unchanged'
         $leftovers = @(Get-ChildItem -LiteralPath $launchDir -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^runtime-retired-|^runtime-staging-' })
-        Assert-Equal 0 $leftovers.Count 'A failed swap must not leave retired or staging directories behind'
+        Assert-Equal 0 $leftovers.Count 'Preparation must not create retired or staging directories'
     }
 
     Invoke-Test 'replaces an older installed runtime only after full validation succeeds' {

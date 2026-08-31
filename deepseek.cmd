@@ -165,7 +165,7 @@ exit /b %DSH_RC%
 echo Usage:
 echo   deepseek                start in foreground mode (default)
 echo   deepseek -b / -d        submit background startup and return immediately
-echo   deepseek --status       check service state (ready/starting/stopped)
+echo   deepseek --status       check service state (starting/ready/unhealthy/foreign-port/failed/stopped)
 echo   deepseek --stop         stop the service
 echo   deepseek --logs [N]     show last N lines of the background log (default 20)
 echo   deepseek --version      show launcher and DeepSeek Harness versions

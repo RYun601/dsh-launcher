@@ -15,6 +15,7 @@ $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $dir 'dsh-version.ps1')
 . (Join-Path $dir 'dsh-node-version.ps1')
+. (Join-Path $dir 'dsh-runtime-layout.ps1')
 
 # 0) Node.js 版本前置检查：不满足要求时直接失败，不触碰正在运行的服务。
 if (-not (Assert-DshNodeEnvironment)) { exit 1 }
@@ -33,9 +34,34 @@ if (-not (ConvertTo-DshSemVer $targetVersion)) {
 }
 Write-Host "目标版本：$targetVersion"
 
+$launchRoot = Join-Path $env:USERPROFILE 'dsh-launch'
+$layout = Get-DshRuntimeLayout -LaunchRoot $launchRoot
+$pointer = Initialize-DshRuntimePointer -Layout $layout
+$oldRuntime = $pointer.Current
+$candidate = New-DshRuntimeCandidate -Layout $layout -Version $targetVersion
+$runScript = Join-Path $dir 'run-dsh.ps1'
+
+# 先在独立候选目录完成 npm 安装、peer 修复和审计；此阶段不得触碰当前指针或旧运行时。
+Write-Host "正在准备候选运行时：$($candidate.Path)"
+& $runScript -Version $candidate.Version -RuntimeRoot $candidate.Path -PrepareOnly
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '[ERROR] 候选运行时准备失败，升级已取消；当前运行时未被更改。'
+    exit $LASTEXITCODE
+}
+Write-DshUpgradeTransaction -Layout $layout -Phase 'PREPARED' -Old $oldRuntime `
+    -Candidate $candidate -StartupToken ([guid]::NewGuid().ToString('N')) | Out-Null
+
 # 2) 停止服务（stop-dsh.ps1 内含误杀防护）
 Write-Host '正在停止服务...'
 & (Join-Path $dir 'stop-dsh.ps1')
+if ($LASTEXITCODE -ne 0) {
+    Write-Host '[ERROR] 停止服务失败，升级已中止；当前运行时未切换。'
+    exit $LASTEXITCODE
+}
+
+$transaction = Read-DshUpgradeTransaction -Layout $layout
+Write-DshUpgradeTransaction -Layout $layout -Phase 'STOPPED' -Old $transaction.Old `
+    -Candidate $transaction.Candidate -StartupToken $transaction.StartupToken | Out-Null
 
 # 2) 删除完整的 DSH npx 工作区（下次启动自动下载最新版）。
 # 只删除 node_modules\@deepseek-ai\dsh 会留下 package-lock.json 和旧依赖树，
@@ -80,7 +106,32 @@ if ($latest) {
     }
 }
 
-# 4) 重新后台启动（自动下载最新版 DSH）
-Write-Host '正在重新后台启动（会自动下载最新版 DSH）...'
-$upgradeTarget = if ($latest) { [string]$latest } else { 'latest' }
-& (Join-Path $dir 'start-background.ps1') -WaitForReady -TimeoutSeconds 900 -Version $upgradeTarget
+# 4) 用候选运行时重新后台启动；只有候选真正就绪后才提交 Current 指针。
+Write-Host '正在用候选运行时重新后台启动并等待就绪...'
+& (Join-Path $dir 'start-background.ps1') -WaitForReady -TimeoutSeconds 900 `
+    -Version $candidate.Version -RuntimeRoot $candidate.Path
+if ($LASTEXITCODE -ne 0) {
+    $candidateExit = $LASTEXITCODE
+    Write-Host "[ERROR] 候选运行时启动失败（exit $candidateExit），正在尝试恢复旧运行时。"
+    & (Join-Path $dir 'stop-dsh.ps1') | Out-Null
+    if ($oldRuntime) {
+        & (Join-Path $dir 'start-background.ps1') -WaitForReady -TimeoutSeconds 900 `
+            -Version $oldRuntime.Version -RuntimeRoot $oldRuntime.Path
+        $rollbackExit = $LASTEXITCODE
+        if ($rollbackExit -eq 0) {
+            Write-Host "旧运行时已恢复：$($oldRuntime.Version)"
+        } else {
+            Write-Host "[ERROR] 旧运行时恢复失败（exit $rollbackExit）。"
+        }
+    } else {
+        Write-Host '[WARN] 没有可恢复的旧运行时。'
+    }
+    exit $candidateExit
+}
+
+$committed = Commit-DshRuntimePointer -Layout $layout -Candidate $candidate
+Write-DshUpgradeTransaction -Layout $layout -Phase 'COMMITTED' -Old $committed.Previous `
+    -Candidate $committed.Current -StartupToken $transaction.StartupToken | Out-Null
+Remove-DshUnreferencedRuntimes -Layout $layout
+Clear-DshUpgradeTransaction -Layout $layout
+Write-Host "升级完成，当前运行时：$($committed.Current.Version)"

@@ -34,6 +34,12 @@ function Reset-TestRuntime {
     if (Test-Path -LiteralPath $runtimeRoot) {
         Remove-Item -LiteralPath $runtimeRoot -Recurse -Force
     }
+    foreach ($path in @(
+        (Join-Path (Split-Path -Parent $runtimeRoot) 'runtime-current.json'),
+        (Join-Path (Split-Path -Parent $runtimeRoot) 'runtime-versions')
+    )) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
+    }
     New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
 }
 
@@ -51,10 +57,11 @@ function New-TestRuntime {
         [Parameter(Mandatory = $true)][string]$Version,
         [switch]$Ready,
         [string]$ReadyVersion = '',
-        [switch]$OmitEntrypoint
+        [switch]$OmitEntrypoint,
+        [string]$Root = $runtimeRoot
     )
 
-    $dshRoot = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh'
+    $dshRoot = Join-Path $Root 'node_modules\@deepseek-ai\dsh'
     New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $dshRoot 'package.json'),
@@ -67,7 +74,7 @@ function New-TestRuntime {
     if ($Ready -or $ReadyVersion) {
         $markerVersion = if ($ReadyVersion) { $ReadyVersion } else { $Version }
         [IO.File]::WriteAllText(
-            (Join-Path $runtimeRoot 'dsh-runtime-ready.json'),
+            (Join-Path $Root 'dsh-runtime-ready.json'),
             (@{
                 SchemaVersion = 2
                 Version = $markerVersion
@@ -157,6 +164,24 @@ try {
         Assert-Equal 0 $result.ExitCode "Marker fallback should succeed. Output:`n$($result.Output)"
         Assert-Equal '0.1.0-rc.7' $result.Output.Trim() 'Invalid marker must not hide a repairable local package'
         Assert-Equal '' (Read-NpmLog) 'Repairable local metadata must not contact npm'
+    }
+
+    Invoke-Test 'current runtime pointer wins over the legacy runtime without registry access' {
+        Reset-TestRuntime
+        Reset-NpmLog
+        New-TestRuntime -Version '0.1.0-rc.7' -Ready
+        . (Join-Path $repoRoot 'dsh-runtime-layout.ps1')
+        $layout = Get-DshRuntimeLayout -LaunchRoot (Split-Path -Parent $runtimeRoot)
+        $versionedRoot = Join-Path $layout.VersionsRoot 'runtime-rc9'
+        New-TestRuntime -Version '0.1.0-rc.9' -Ready -Root $versionedRoot
+        $candidate = [pscustomobject]@{ Path = $versionedRoot; Version = '0.1.0-rc.9' }
+        Commit-DshRuntimePointer -Layout $layout -Candidate $candidate | Out-Null
+
+        $result = Invoke-Resolver -PreferLocalRuntime
+
+        Assert-Equal 0 $result.ExitCode "Pointer resolution should succeed. Output:`n$($result.Output)"
+        Assert-Equal '0.1.0-rc.9' $result.Output.Trim() 'Current pointer version should be selected'
+        Assert-Equal '' (Read-NpmLog) 'Pointer resolution must not contact npm'
     }
 
     Invoke-Test 'invalid local installation falls back to published tags' {

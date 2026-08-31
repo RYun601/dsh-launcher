@@ -34,6 +34,7 @@ function New-UpgradeFixture {
     Copy-Item -LiteralPath $upgradeScript -Destination (Join-Path $Root 'upgrade-dsh.ps1')
     Copy-Item -LiteralPath $versionHelper -Destination (Join-Path $Root 'dsh-version.ps1')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-node-version.ps1') -Destination (Join-Path $Root 'dsh-node-version.ps1')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-runtime-layout.ps1') -Destination (Join-Path $Root 'dsh-runtime-layout.ps1')
     [IO.File]::WriteAllText(
         (Join-Path $Root 'resolve-dsh-version.ps1'),
         "Write-Output '$ResolvedVersion'`r`n",
@@ -43,6 +44,19 @@ function New-UpgradeFixture {
         (Join-Path $Root 'stop-dsh.ps1'),
         "[IO.File]::WriteAllText(`$env:DSH_TEST_STOP_MARKER, 'STOPPED', [Text.Encoding]::ASCII)`r`nexit 0`r`n",
         [Text.Encoding]::ASCII
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $Root 'run-dsh.ps1'),
+        @'
+param([string]$Version, [string]$RuntimeRoot, [switch]$PrepareOnly)
+$dshRoot = Join-Path $RuntimeRoot 'node_modules\@deepseek-ai\dsh'
+New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
+[IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), 'entry', [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText((Join-Path $dshRoot 'package.json'), (@{name='@deepseek-ai/dsh';version=$Version}|ConvertTo-Json), [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText((Join-Path $RuntimeRoot 'dsh-runtime-ready.json'), (@{SchemaVersion=2;Version=$Version;ValidatedBy='npm-ls-all'}|ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+exit 0
+'@,
+        [Text.UTF8Encoding]::new($false)
     )
     [IO.File]::WriteAllText(
         (Join-Path $Root 'dsh-launch-state.ps1'),
@@ -55,7 +69,8 @@ function New-UpgradeFixture {
 param(
     [switch]$WaitForReady,
     [int]$TimeoutSeconds,
-    [string]$Version
+     [string]$Version,
+     [string]$RuntimeRoot
 )
 [IO.File]::WriteAllText(
     $env:DSH_TEST_UPGRADE_LOG,

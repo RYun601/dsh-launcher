@@ -103,13 +103,13 @@ cd dsh-launcher
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：提交后立即返回，服务继续运行并在就绪后自动打开浏览器 |
 | `deepseek --status` | 查看服务状态（`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`）；启动下载期间显示 `STARTING`，失败时提示日志路径 |
-| `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令 |
+| `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令；进程无法结束或等待超时会显式报错并以非零码退出 |
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
 | `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
 | `deepseek --upgrade` | 一键升级：解析并校验目标版本（失败则中止且不停止服务）→ 停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动 |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
-| `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认；先停止服务，目录先备份后删除，删除失败时保留备份并提示位置） |
+| `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认，取消不做任何更改；先停止服务，目录先备份后删除；PATH 在目录全部备份成功后才移除；安装目录会校验所有权标记，删除失败时保留备份并提示位置） |
 | `deepseek --check` | 环境自检（脚本路径 / npm / 端口） |
 | `deepseek --help` | 查看帮助 |
 

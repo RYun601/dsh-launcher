@@ -7,6 +7,7 @@ param(
 # Prints nothing when the registry cannot be queried; callers decide the fallback.
 $ErrorActionPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'dsh-version.ps1')
+. (Join-Path $PSScriptRoot 'dsh-runtime-layout.ps1')
 
 if (-not $RuntimeRoot) {
     $RuntimeRoot = Join-Path $env:USERPROFILE 'dsh-launch\runtime'
@@ -57,6 +58,14 @@ function Get-InstalledRuntimeVersion {
 }
 
 if ($PreferLocalRuntime) {
+    try {
+        $layout = Get-DshRuntimeLayout -LaunchRoot (Split-Path -Parent $RuntimeRoot)
+        $pointer = Read-DshRuntimePointer -Layout $layout
+        if ($pointer.Current -and (Test-DshRuntimeReady -Path $pointer.Current.Path -ExpectedVersion $pointer.Current.Version)) {
+            Write-Output $pointer.Current.Version
+            exit 0
+        }
+    } catch { }
     $selectedVersion = Get-InstalledRuntimeVersion -Root $RuntimeRoot -RequireReadyMarker
     if (-not $selectedVersion) {
         $selectedVersion = Get-InstalledRuntimeVersion -Root $RuntimeRoot

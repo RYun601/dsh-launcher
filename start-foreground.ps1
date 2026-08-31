@@ -1,6 +1,7 @@
 param(
     [string]$Version,
     [string]$LaunchRoot = (Join-Path $env:USERPROFILE 'dsh-launch'),
+    [string]$RuntimeRoot,
     [ValidateRange(1, 65535)]
     [int]$Port = 3080,
     [ValidateRange(1, 86400)]
@@ -16,7 +17,8 @@ $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
 $healthHelper = Join-Path $PSScriptRoot 'dsh-service-health.ps1'
 $monitorScript = Join-Path $PSScriptRoot 'open-when-ready.ps1'
 $runScript = Join-Path $PSScriptRoot 'run-dsh.ps1'
-$runtimeRoot = Join-Path $LaunchRoot 'runtime'
+if (-not $RuntimeRoot) { $RuntimeRoot = Join-Path $LaunchRoot 'runtime' }
+$runtimeRoot = $RuntimeRoot
 $entrypoint = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 $url = "http://127.0.0.1:$Port"
 $startupToken = [guid]::NewGuid().ToString('N')
@@ -28,7 +30,20 @@ $dshStarted = $false
 $dshExitCode = 1
 
 . $healthHelper
+. (Join-Path $PSScriptRoot 'dsh-runtime-layout.ps1')
 New-Item -ItemType Directory -Force -Path $LaunchRoot | Out-Null
+
+if (-not $PSBoundParameters.ContainsKey('RuntimeRoot')) {
+    try {
+        $runtimeLayout = Get-DshRuntimeLayout -LaunchRoot $LaunchRoot
+        $runtimePointer = Initialize-DshRuntimePointer -Layout $runtimeLayout
+        if ($runtimePointer.Current -and (Test-DshRuntimeReady -Path $runtimePointer.Current.Path -ExpectedVersion $runtimePointer.Current.Version)) {
+            $runtimeRoot = $runtimePointer.Current.Path
+            $entrypoint = Join-Path $runtimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+            if (-not $Version) { $Version = $runtimePointer.Current.Version }
+        }
+    } catch { }
+}
 
 function Get-ForegroundStartupState {
     try {
