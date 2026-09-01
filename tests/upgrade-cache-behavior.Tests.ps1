@@ -28,8 +28,14 @@ function New-UpgradeFixture {
     $fakeBin = Join-Path $Root 'fake-bin'
     $appData = Join-Path $Root 'app-data'
     $localAppData = Join-Path $Root 'local-app-data'
+    # upgrade-dsh.ps1 treats $env:USERPROFILE\dsh-launch as the launcher data
+    # directory; the fixture must redirect USERPROFILE too, or the test would
+    # pollute the real user environment.
+    $userProfile = Join-Path $Root 'user-profile'
     $startLog = Join-Path $Root 'start.log'
-    New-Item -ItemType Directory -Force -Path $fakeBin, $appData, $localAppData | Out-Null
+    $attemptsLog = Join-Path $Root 'start-attempts.log'
+    New-Item -ItemType Directory -Force -Path $fakeBin, $appData, $localAppData, $userProfile | Out-Null
+    [IO.File]::WriteAllText($attemptsLog, '', [Text.Encoding]::ASCII)
 
     Copy-Item -LiteralPath $upgradeScript -Destination (Join-Path $Root 'upgrade-dsh.ps1')
     Copy-Item -LiteralPath $versionHelper -Destination (Join-Path $Root 'dsh-version.ps1')
@@ -51,7 +57,7 @@ function New-UpgradeFixture {
 param([string]$Version, [string]$RuntimeRoot, [switch]$PrepareOnly)
 $dshRoot = Join-Path $RuntimeRoot 'node_modules\@deepseek-ai\dsh'
 New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
-[IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), 'entry', [Text.Encoding]::ASCII)
+[IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), ('#!/usr/bin/env node' + (';' * 2048)), [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText((Join-Path $dshRoot 'package.json'), (@{name='@deepseek-ai/dsh';version=$Version}|ConvertTo-Json), [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText((Join-Path $RuntimeRoot 'dsh-runtime-ready.json'), (@{SchemaVersion=2;Version=$Version;ValidatedBy='npm-ls-all'}|ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 exit 0
@@ -77,7 +83,14 @@ param(
     "VERSION=$Version;WAIT=$WaitForReady;TIMEOUT=$TimeoutSeconds",
     [Text.Encoding]::ASCII
 )
-exit 0
+[IO.File]::AppendAllText(
+    $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG,
+    "VERSION=$Version;ROOT=$RuntimeRoot`r`n",
+    [Text.Encoding]::ASCII
+)
+$exitCode = 0
+if ($env:DSH_TEST_START_FAIL_VERSION -and $Version -eq $env:DSH_TEST_START_FAIL_VERSION) { $exitCode = 1 }
+exit $exitCode
 '@,
         [Text.Encoding]::ASCII
     )
@@ -107,7 +120,9 @@ exit 0
         FakeBin       = $fakeBin
         AppData       = $appData
         LocalAppData  = $localAppData
+        UserProfile   = $userProfile
         StartLog      = $startLog
+        AttemptsLog   = $attemptsLog
         NpmLog        = $NpmLog
         StopMarker    = Join-Path $Root 'stop.log'
     }
@@ -116,13 +131,17 @@ exit 0
 function Invoke-UpgradeFixture {
     param(
         [pscustomobject]$Fixture,
-        [string]$NodeVersion = ''
+        [string]$NodeVersion = '',
+        [string]$StartFailVersion = ''
     )
 
     $previousPath = $env:PATH
     $previousAppData = $env:APPDATA
     $previousLocalAppData = $env:LOCALAPPDATA
+    $previousUserProfile = $env:USERPROFILE
     $previousUpgradeLog = $env:DSH_TEST_UPGRADE_LOG
+    $previousAttemptsLog = $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG
+    $previousStartFailVersion = $env:DSH_TEST_START_FAIL_VERSION
     $previousNpmLog = $env:DSH_TEST_NPM_LOG
     $previousStopMarker = $env:DSH_TEST_STOP_MARKER
     $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
@@ -130,7 +149,10 @@ function Invoke-UpgradeFixture {
         $env:PATH = "$($Fixture.FakeBin);$previousPath"
         $env:APPDATA = $Fixture.AppData
         $env:LOCALAPPDATA = $Fixture.LocalAppData
+        $env:USERPROFILE = $Fixture.UserProfile
         $env:DSH_TEST_UPGRADE_LOG = $Fixture.StartLog
+        $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG = $Fixture.AttemptsLog
+        $env:DSH_TEST_START_FAIL_VERSION = $StartFailVersion
         $env:DSH_TEST_NPM_LOG = $Fixture.NpmLog
         $env:DSH_TEST_STOP_MARKER = $Fixture.StopMarker
         $env:DSH_TEST_NODE_VERSION = $NodeVersion
@@ -144,7 +166,10 @@ function Invoke-UpgradeFixture {
         $env:PATH = $previousPath
         $env:APPDATA = $previousAppData
         $env:LOCALAPPDATA = $previousLocalAppData
+        $env:USERPROFILE = $previousUserProfile
         $env:DSH_TEST_UPGRADE_LOG = $previousUpgradeLog
+        $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG = $previousAttemptsLog
+        $env:DSH_TEST_START_FAIL_VERSION = $previousStartFailVersion
         $env:DSH_TEST_NPM_LOG = $previousNpmLog
         $env:DSH_TEST_STOP_MARKER = $previousStopMarker
         $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
@@ -161,6 +186,14 @@ function Assert-Match {
     param([string]$Actual, [string]$Pattern, [string]$Message)
 
     if ($Actual -notmatch $Pattern) {
+        throw "$Message`nActual output:`n$Actual"
+    }
+}
+
+function Assert-NotMatch {
+    param([string]$Actual, [string]$Pattern, [string]$Message)
+
+    if ($Actual -match $Pattern) {
         throw "$Message`nActual output:`n$Actual"
     }
 }
@@ -200,6 +233,49 @@ function New-NpxWorkspace {
     Set-Content -LiteralPath (Join-Path $Path 'package-lock.json') -Value '{}' -Encoding UTF8
 }
 
+function New-FakeReadyRuntimeAt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    $dshRoot = Join-Path (Join-Path (Join-Path $Root 'node_modules') '@deepseek-ai') 'dsh'
+    New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
+    $fakeEntry = "#!/usr/bin/env node`r`n" + (('// fake dsh entrypoint`r`n') * 80)
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), $fakeEntry, [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText(
+        (Join-Path $dshRoot 'package.json'),
+        (@{ name = '@deepseek-ai/dsh'; version = $Version } | ConvertTo-Json),
+        [Text.Encoding]::ASCII
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $Root 'dsh-runtime-ready.json'),
+        (@{ SchemaVersion = 2; Version = $Version; ValidatedBy = 'npm-ls-all' } | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function New-FakeStubRuntimeAt {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+
+    $dshRoot = Join-Path (Join-Path (Join-Path $Root 'node_modules') '@deepseek-ai') 'dsh'
+    New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), 'entry', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText(
+        (Join-Path $dshRoot 'package.json'),
+        (@{ name = '@deepseek-ai/dsh'; version = $Version } | ConvertTo-Json),
+        [Text.Encoding]::ASCII
+    )
+    [IO.File]::WriteAllText(
+        (Join-Path $Root 'dsh-runtime-ready.json'),
+        (@{ SchemaVersion = 2; Version = $Version; ValidatedBy = 'npm-ls-all' } | ConvertTo-Json),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 try {
     Invoke-Test 'clears complete DSH npx workspaces and preserves unrelated workspaces' {
@@ -237,6 +313,11 @@ try {
             'Upgrade must pass its registry-selected version to the synchronous startup coordinator'
         Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.0-rc\.8$' `
             'Upgrade must install the missing global dsh command'
+        Assert-True (Test-Path -LiteralPath (Join-Path $fixture.UserProfile 'dsh-launch\runtime-current.json')) `
+            'Launcher state must stay inside the isolated fixture USERPROFILE'
+        $fixtureRuntimes = @(Get-ChildItem -LiteralPath (Join-Path $fixture.UserProfile 'dsh-launch\runtime-versions') `
+            -Directory -ErrorAction SilentlyContinue)
+        Assert-True ($fixtureRuntimes.Count -ge 1) 'The fixture must create candidates only inside its isolated USERPROFILE'
     }
 
     Invoke-Test 'explicit upgrade refreshes an outdated global dsh command' {
@@ -260,6 +341,43 @@ try {
 
         Assert-True ($result.ExitCode -eq 0) "Upgrade fixture should succeed. Output:`n$($result.Output)"
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
+    }
+
+    Invoke-Test 'candidate failure rolls back through the ready legacy runtime and clears the transaction' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-rollback') `
+            -NpmLog (Join-Path $testRoot 'upgrade-rollback-npm.log') `
+            -ResolvedVersion '0.1.2-alpha.3'
+        $launchDir = Join-Path $fixture.UserProfile 'dsh-launch'
+        $versionsDir = Join-Path $launchDir 'runtime-versions'
+        $legacyDir = Join-Path $launchDir 'runtime'
+        $stubDir = Join-Path $versionsDir ('runtime-0.1.0-rc.6-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $legacyDir, $stubDir | Out-Null
+        New-FakeStubRuntimeAt -Root $stubDir -Version '0.1.0-rc.6'
+        New-FakeReadyRuntimeAt -Root $legacyDir -Version '0.1.0-rc.7'
+        $pointer = @{
+            SchemaVersion = 1
+            Current   = @{ Path = (Join-Path 'runtime-versions' (Split-Path $stubDir -Leaf)); Version = '0.1.0-rc.6' }
+            Previous = $null
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $launchDir 'runtime-current.json'),
+            ($pointer | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture -StartFailVersion '0.1.2-alpha.3'
+
+        Assert-Equal 1 $result.ExitCode "A failed candidate must propagate the candidate exit code. Output:`n$($result.Output)"
+        Assert-Match $result.Output '\[WARN\].*0\.1\.0-rc\.6' 'The upgrade must warn that the current runtime is not ready'
+        Assert-Match $result.Output '0\.1\.0-rc\.7' 'The rollback must restore the ready legacy runtime'
+        $attempts = [IO.File]::ReadAllText($fixture.AttemptsLog)
+        Assert-Match $attempts '^VERSION=0\.1\.2-alpha\.3;' 'The candidate must be started once'
+        Assert-Match $attempts '(?m)^VERSION=0\.1\.0-rc\.7;' 'The legacy runtime must be attempted for rollback'
+        Assert-NotMatch $attempts 'VERSION=0\.1\.0-rc\.6' 'A stub current runtime must never be used for rollback'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-upgrade.json'))) `
+            'A failed upgrade must clear its transaction'
+        Assert-True (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-current.json')) `
+            'The pointer must remain intact after a failed upgrade'
     }
 
     Invoke-Test 'explicit upgrade aborts without stopping the service when the target version cannot be resolved' {

@@ -129,7 +129,8 @@ function New-FakeReadyRuntime {
 
     $dshRoot = Join-Path (Join-Path (Join-Path $Root 'node_modules') '@deepseek-ai') 'dsh'
     New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), '// fake dsh', [Text.Encoding]::ASCII)
+    $fakeEntry = "#!/usr/bin/env node`r`n" + (('// fake dsh entrypoint`r`n') * 80)
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), $fakeEntry, [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText(
         (Join-Path $dshRoot 'package.json'),
         (@{ name = '@deepseek-ai/dsh'; version = $DshVersion } | ConvertTo-Json),
@@ -195,7 +196,7 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
     $dshRoot = Join-Path $modules 'dsh'
     $bootRoot = Join-Path $modules 'dsh-app-boot'
     New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib'), $bootRoot | Out-Null
-    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), '// fake dsh', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), ('#!/usr/bin/env node' + (';' * 2048)), [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText(
         (Join-Path $dshRoot 'package.json'),
         (@{ name = '@deepseek-ai/dsh'; version = '0.1.0-rc.8' } | ConvertTo-Json),

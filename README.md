@@ -107,7 +107,7 @@ cd dsh-launcher
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
 | `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
 | `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
-| `deepseek --upgrade` | 一键升级：解析并校验目标版本（失败则中止且不停止服务）→ 停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动 |
+| `deepseek --upgrade` | 一键升级：解析并校验目标版本（失败则中止且不停止服务）→ 停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动；候选版本启动失败时会依次尝试恢复当前、上一版或旧版可用运行时（只有通过就绪校验的运行时才会被用于回退） |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
 | `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认，取消不做任何更改；先停止服务，目录先备份后删除；PATH 在目录全部备份成功后才移除；安装目录会校验所有权标记，删除失败时保留备份并提示位置） |
 | `deepseek --check` | 环境自检（脚本路径 / npm / 端口） |

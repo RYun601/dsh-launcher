@@ -48,6 +48,16 @@ function Test-DshRuntimeReady {
         -not (Test-Path -LiteralPath $entrypoint -PathType Leaf)) {
         return $false
     }
+    # A real published DSH entrypoint is a complete bundle (thousands of bytes);
+    # placeholder/stub entrypoints (5-byte test fixtures or failed installs) are
+    # never valid runtimes.
+    try {
+        if ((Get-Item -LiteralPath $entrypoint).Length -lt 1024) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
     try {
         $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([int]$marker.SchemaVersion -ne 2 -or [string]$marker.ValidatedBy -ne 'npm-ls-all') {

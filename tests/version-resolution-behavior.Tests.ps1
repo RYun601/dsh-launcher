@@ -69,7 +69,7 @@ function New-TestRuntime {
         [Text.UTF8Encoding]::new($false)
     )
     if (-not $OmitEntrypoint) {
-        [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), '// fake dsh', [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), ('#!/usr/bin/env node' + (';' * 2048)), [Text.Encoding]::ASCII)
     }
     if ($Ready -or $ReadyVersion) {
         $markerVersion = if ($ReadyVersion) { $ReadyVersion } else { $Version }

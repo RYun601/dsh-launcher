@@ -46,7 +46,10 @@ function New-FakeReadyRuntime {
     param([string]$Root, [string]$Version)
     $dshRoot = Join-Path $Root 'node_modules\@deepseek-ai\dsh'
     New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
-    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), 'entry', [Text.Encoding]::ASCII)
+    # The entrypoint must look like a real packaged bundle (>1KB); a 5-byte
+    # placeholder must never count as a ready runtime.
+    $fakeEntry = "#!/usr/bin/env node`r`n" + (('// fake dsh entrypoint`r`n') * 80)
+    [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), $fakeEntry, [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText(
         (Join-Path $dshRoot 'package.json'),
         (@{ name = '@deepseek-ai/dsh'; version = $Version } | ConvertTo-Json -Compress),
@@ -90,6 +93,27 @@ try {
         Assert-Throws { Resolve-DshOwnedRuntimePath -LaunchRoot $launchRoot -RelativePath 'C:\outside' } 'Absolute pointer path must fail'
         Assert-Throws { Resolve-DshOwnedRuntimePath -LaunchRoot $launchRoot -RelativePath '..\.dsh\secret' } 'Credential path escape must fail'
         Assert-True (Test-Path -LiteralPath $sentinel) 'Rejected paths must not delete sentinels'
+    }
+
+    Invoke-Test 'a stub entrypoint is not considered ready' {
+        . $helper
+        $layout = Get-DshRuntimeLayout -LaunchRoot $launchRoot
+        $stub = New-DshRuntimeCandidate -Layout $layout -Version '0.1.0-rc.6'
+        $dshRoot = Join-Path (Join-Path $stub.Path 'node_modules\@deepseek-ai') 'dsh'
+        New-Item -ItemType Directory -Force -Path (Join-Path $dshRoot 'lib') | Out-Null
+        [IO.File]::WriteAllText((Join-Path $dshRoot 'lib\bin.js'), 'entry', [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText(
+            (Join-Path $dshRoot 'package.json'),
+            (@{ name = '@deepseek-ai/dsh'; version = '0.1.0-rc.6' } | ConvertTo-Json -Compress),
+            [Text.Encoding]::ASCII
+        )
+        [IO.File]::WriteAllText(
+            (Join-Path $stub.Path 'dsh-runtime-ready.json'),
+            (@{ SchemaVersion = 2; Version = '0.1.0-rc.6'; ValidatedBy = 'npm-ls-all' } | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Assert-True (-not (Test-DshRuntimeReady -Path $stub.Path -ExpectedVersion '0.1.0-rc.6')) `
+            'A stub entrypoint (5 bytes) must never be considered ready'
     }
 
     Invoke-Test 'writes and clears an upgrade transaction with relative selections' {

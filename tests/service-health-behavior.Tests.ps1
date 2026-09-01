@@ -97,11 +97,13 @@ function Invoke-Classification {
         [string]$CommandLine,
         [string]$Body,
         [int]$StatusCode,
-        [int]$StableMilliseconds = 0
+        [int]$StableMilliseconds = 0,
+        [int]$ParentProcessId = 0
     )
+    $effectiveParentPid = if ($ParentProcessId -gt 0) { $ParentProcessId } else { $script:ExpectedRunnerPid }
     $script:DshTestProcessInfo = [pscustomobject]@{
         ProcessId = 4321
-        ParentProcessId = $script:ExpectedRunnerPid
+        ParentProcessId = $effectiveParentPid
         Name = if ($CommandLine -match '^node(?:\.exe)?\s') { 'node.exe' } else { 'powershell.exe' }
         CommandLine = $CommandLine
         ExecutablePath = if ($CommandLine -match '^node(?:\.exe)?\s') { 'C:\node\node.exe' } else { 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' }
@@ -173,13 +175,21 @@ try {
     $expectedNodeCommand = 'node.exe "' + $script:ExpectedEntrypoint + '" --port 12345'
 
     Invoke-Test 'wrong entrypoint is foreign' {
-        $foreign = Invoke-Classification -CommandLine 'node.exe C:\apps\other\server.js' -Body '<div id="root"></div>' -StatusCode 200
-        Assert-Equal 'FOREIGN_PORT' $foreign.State 'Wrong entrypoint must be foreign'
+        $foreign = Invoke-Classification -CommandLine 'node.exe C:\apps\other\server.js' -Body '<div id="root"></div>' -StatusCode 200 `
+            -ParentProcessId 77777
+        Assert-Equal 'FOREIGN_PORT' $foreign.State 'A non-descendant wrong entrypoint must be foreign'
     }
 
     Invoke-Test 'substring marker does not establish process identity' {
-        $spoof = Invoke-Classification -CommandLine 'powershell.exe -Command "# @deepseek-ai/dsh/lib/bin.js"' -Body '<div id="root"></div>' -StatusCode 200
+        $spoof = Invoke-Classification -CommandLine 'powershell.exe -Command "# @deepseek-ai/dsh/lib/bin.js"' -Body '<div id="root"></div>' -StatusCode 200 `
+            -ParentProcessId 77777
         Assert-Equal 'FOREIGN_PORT' $spoof.State 'A substring marker must not establish identity'
+    }
+
+    Invoke-Test 'runner descendant with an unrecognized entrypoint is unhealthy, not foreign' {
+        $descendant = Invoke-Classification -CommandLine 'node.exe C:\runner\node_modules\@deepseek-ai\dsh-host-apiproxy\lib\main.js' `
+            -Body 'error' -StatusCode 500
+        Assert-Equal 'UNHEALTHY' $descendant.State 'A runner-descendant listener must not be reported as a foreign port'
     }
 
     Invoke-Test 'quoted argument containing the entrypoint plus extra text is rejected' {

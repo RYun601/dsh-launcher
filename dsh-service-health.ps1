@@ -337,6 +337,16 @@ function Get-DshServiceClassification {
 
     $servicePid = [int]$owner.ProcessId
     if (-not (Test-DshProcessIdentity -ProcessId $servicePid -ExpectedEntrypoint $entrypoint)) {
+        # DSH startup may place the listener in a runner-descendant subprocess
+        # (platform proxy / tool subprocess). A listener that truly descends from
+        # the current runner belongs to this startup; report it as not-ready
+        # instead of a foreign port. Genuinely external processes stay FOREIGN_PORT.
+        if ($RunnerPid -gt 0 -and
+            (Test-DshServiceDescendsFromRunner -ServicePid $servicePid -RunnerPid $RunnerPid)) {
+            return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+                -Message 'The DeepSeek Harness listener is a runner subprocess with an unrecognized entrypoint' `
+                -HttpStatus $null -Entrypoint $entrypoint
+        }
         return New-DshServiceClassificationResult -State 'FOREIGN_PORT' -ServicePid $servicePid `
             -Message "Port $Port is owned by a process that is not DeepSeek Harness" `
             -HttpStatus $null -Entrypoint $entrypoint
