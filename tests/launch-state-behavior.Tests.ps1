@@ -1087,7 +1087,8 @@ try {
             Assert-Equal 0 $lockA.ExitCode "Token-A lock setup should succeed. Output:`n$($lockA.Output)"
             $stateA = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
                 '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
-                '-State', 'STARTING', '-OwnerPid', $runnerA.Id, '-Version', '0.1.0-rc.7',
+                '-State', 'READY', '-OwnerPid', $runnerA.Id, '-ServicePid', 7100,
+                '-Version', '0.1.0-rc.7',
                 '-StartupToken', $tokenA, '-RuntimeRoot', $runtimeRoot,
                 '-Entrypoint', $entrypoint
             )
@@ -1141,9 +1142,9 @@ try {
             Assert-Equal $tokenB $finalState.StartupToken 'The stale token-A probe must never overwrite token-B state'
             Assert-Equal $runnerB.Id $finalState.RunnerPid 'The stale probe must never restore the token-A runner'
             $trace = @(Get-Content -LiteralPath $fixture.TracePath)
-            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31996\|.*\|$tokenA\|$($runnerA.Id)\|" `
+            Assert-Match ($trace -join [Environment]::NewLine) "CLASSIFY\|31996\|.*\|$tokenA\|$($runnerA.Id)\|" `
                 'The test must observe the initial token-A probe'
-            Assert-Match ($trace -join [Environment]::NewLine) "WAIT\|31996\|.*\|$tokenB\|$($runnerB.Id)\|" `
+            Assert-Match ($trace -join [Environment]::NewLine) "CLASSIFY\|31996\|.*\|$tokenB\|$($runnerB.Id)\|" `
                 'After invalidation, GetStatus must classify the new token-B snapshot'
         } finally {
             Remove-Item Env:\DSH_TEST_MODE, Env:\DSH_TEST_STATUS_AFTER_PROBE_SIGNAL, Env:\DSH_TEST_STATUS_AFTER_PROBE_CONTINUE, `
