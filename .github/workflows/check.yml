@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
-          grep -q -- '"-d"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
+          grep -q -- '/c:"^-d\$"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
           grep -q 'New-Item -ItemType Directory' background-run.ps1 || { echo "::error::background-run.ps1 missing log dir creation"; exit 1; }
           grep -q -- '--upgrade' deepseek.cmd || { echo "::error::deepseek.cmd missing --upgrade"; exit 1; }
           grep -q -- '--logs' deepseek.cmd || { echo "::error::deepseek.cmd missing --logs"; exit 1; }
