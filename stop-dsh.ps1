@@ -38,6 +38,12 @@ function Stop-DshProcessTree {
     if (-not (Test-DshLauncherProcess -ProcessId $ProcessId)) { return $false }
     & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
+        # 进程可能在身份校验和 taskkill 之间自行退出；此时停止目标已经达成。
+        # 端口与启动锁仍会在调用方的条件等待中再次确认，避免把子进程残留误判为成功。
+        if (-not (Test-DshLauncherProcess -ProcessId $ProcessId)) {
+            $global:LASTEXITCODE = 0
+            return $true
+        }
         Write-Host "[ERROR] 结束 DSH 进程失败：taskkill /PID $ProcessId 返回退出码 $LASTEXITCODE。"
         return 'failed'
     }

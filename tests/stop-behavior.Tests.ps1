@@ -76,6 +76,10 @@ function global:taskkill.exe {
     [IO.File]::AppendAllText($env:DSH_STOP_TEST_KILL_LOG, ($args -join ' ') + [Environment]::NewLine, [Text.Encoding]::ASCII)
     if ($env:DSH_STOP_TASKKILL_EXIT -eq '5') {
         $global:LASTEXITCODE = 5
+        if ($env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES -eq '1') {
+            $env:DSH_STOP_PROCESS_GONE = '1'
+            Remove-Item -LiteralPath (Join-Path $env:USERPROFILE 'dsh-launch\dsh-startup.lock') -Recurse -Force -ErrorAction SilentlyContinue
+        }
         return
     }
     $global:LASTEXITCODE = 0
@@ -116,7 +120,8 @@ function Invoke-StopScenario {
         [Parameter(Mandatory = $true)][string]$Scenario,
         [string]$HasListener = '0',
         [string]$TaskkillExit = '0',
-        [string]$TaskkillReleases = '0'
+        [string]$TaskkillReleases = '0',
+        [string]$TaskkillFailsButReleases = '0'
     )
 
     $previousProfile = $env:DSH_STOP_TEST_PROFILE
@@ -129,6 +134,7 @@ function Invoke-StopScenario {
     $previousListener = $env:DSH_STOP_HAS_LISTENER
     $previousKillExit = $env:DSH_STOP_TASKKILL_EXIT
     $previousRelease = $env:DSH_STOP_TASKKILL_RELEASES
+    $previousFailButRelease = $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES
     $previousGone = $env:DSH_STOP_PROCESS_GONE
     try {
         New-Item -ItemType Directory -Force -Path $launchRoot | Out-Null
@@ -142,6 +148,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_HAS_LISTENER = $HasListener
         $env:DSH_STOP_TASKKILL_EXIT = $TaskkillExit
         $env:DSH_STOP_TASKKILL_RELEASES = $TaskkillReleases
+        $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES = $TaskkillFailsButReleases
         $env:DSH_STOP_PROCESS_GONE = '0'
         $env:DSH_STOP_OWNER_PID = [string]$PID
         New-IdentityStartupLock
@@ -164,6 +171,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_HAS_LISTENER = $previousListener
         $env:DSH_STOP_TASKKILL_EXIT = $previousKillExit
         $env:DSH_STOP_TASKKILL_RELEASES = $previousRelease
+        $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES = $previousFailButRelease
         $env:DSH_STOP_PROCESS_GONE = $previousGone
         if (Test-Path -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock')) {
             Remove-Item -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock') -Recurse -Force
@@ -180,7 +188,7 @@ try {
         $result = Invoke-StopScenario -Scenario 'locked-runner' -TaskkillReleases '1'
         Assert-Equal 0 $result.ExitCode "A verified stop must succeed. Output:`n$($result.Output)"
         Assert-Match $result.KillLog '/PID \d+ /T /F' 'Stop must taskkill the verified runner tree'
-        Assert-Match $result.Output ([char]0x505c) 'Success output must confirm the stop'
+        Assert-Match $result.Output 'PID' 'Success output must identify the stopped process'
     }
 
     Invoke-Test 'a failed taskkill propagates as a stop failure with a nonzero exit code' {
@@ -188,6 +196,11 @@ try {
         Assert-Equal 1 $result.ExitCode 'taskkill failure must propagate'
         Assert-Match $result.Output 'taskkill.*5|5.*taskkill' 'The failure must name taskkill and its exit code'
         Assert-Match $result.KillLog '/PID \d+ /T /F' 'The kill attempt itself must still be logged'
+    }
+
+    Invoke-Test 'a taskkill race succeeds when the verified process has already exited' {
+        $result = Invoke-StopScenario -Scenario 'locked-runner' -TaskkillExit '5' -TaskkillFailsButReleases '1'
+        Assert-Equal 0 $result.ExitCode 'A process that exits during taskkill must not make stop fail'
     }
 
     Invoke-Test 'a surviving process or lock fails the stop after the condition wait times out' {

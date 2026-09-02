@@ -40,7 +40,10 @@ function Get-FreeTcpPort {
 }
 
 function Start-FakeHttpFixture {
-    param([Parameter(Mandatory = $true)][string]$Body)
+    param(
+        [Parameter(Mandatory = $true)][string]$Body,
+        [switch]$RequireToken
+    )
 
     $port = Get-FreeTcpPort
     $bodyPath = Join-Path $testRoot ('body-' + [guid]::NewGuid().ToString('N') + '.txt')
@@ -48,7 +51,7 @@ function Start-FakeHttpFixture {
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = 'powershell.exe'
     $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $fixtureScript +
-        '" -Port ' + $port + ' -BodyPath "' + $bodyPath + '"'
+        '" -Port ' + $port + ' -BodyPath "' + $bodyPath + '"' + $(if ($RequireToken) { ' -RequireToken' } else { '' })
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $process = [Diagnostics.Process]::Start($startInfo)
@@ -73,7 +76,8 @@ function Invoke-MonitorScenario {
     param(
         [Parameter(Mandatory = $true)][string]$ScenarioName,
         [Parameter(Mandatory = $true)][string]$Body,
-        [int]$StableMilliseconds = 100
+        [int]$StableMilliseconds = 100,
+        [switch]$RequireToken
     )
 
     $scenarioRoot = Join-Path $testRoot $ScenarioName
@@ -86,8 +90,15 @@ function Invoke-MonitorScenario {
     [IO.File]::WriteAllText($entrypoint, '// fake dsh', [Text.Encoding]::ASCII)
     [IO.File]::WriteAllText($eventsPath, '', [Text.Encoding]::ASCII)
 
-    $fixture = Start-FakeHttpFixture -Body $Body
+    $fixture = Start-FakeHttpFixture -Body $Body -RequireToken:$RequireToken.IsPresent
     try {
+        if ($RequireToken) {
+            [IO.File]::WriteAllText(
+                (Join-Path $launchRoot 'dsh-background.log'),
+                "dsh web: http://127.0.0.1:$($fixture.Port)/?token=test-token`r`n",
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
         $output = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harnessPath `
             -MonitorScript $monitorScript -LaunchRoot $launchRoot -EventsPath $eventsPath `
             -Port $fixture.Port -Entrypoint $entrypoint -RuntimeRoot $runtimeRoot `
@@ -114,9 +125,9 @@ function Invoke-MonitorScenario {
 
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
 $fixtureSource = @'
-param([int]$Port, [string]$BodyPath)
+param([int]$Port, [string]$BodyPath, [switch]$RequireToken)
 $bodyBytes = [Text.Encoding]::UTF8.GetBytes([IO.File]::ReadAllText($BodyPath, [Text.Encoding]::UTF8))
-$headerBytes = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n")
+$unauthorizedBytes = [Text.Encoding]::UTF8.GetBytes('unauthorized')
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
 $listener.Start()
 try {
@@ -125,12 +136,23 @@ try {
         try {
             $stream = $client.GetStream()
             $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+            $requestLine = $reader.ReadLine()
+            $cookieHeader = ''
             while ($true) {
                 $line = $reader.ReadLine()
                 if ($null -eq $line -or $line -eq '') { break }
+                if ($line -match '(?i)^Cookie:\s*(.*)$') { $cookieHeader = $Matches[1] }
             }
+            $hasToken = $requestLine -match '/\?token=test-token(?:\s|$)'
+            $hasAuthCookie = $cookieHeader -match '(?i)(?:^|;\s*)dsh-auth-test=ok(?:;|$)'
+            $isAuthorized = -not $RequireToken -or $hasAuthCookie
+            $isTokenHandshake = $RequireToken -and $hasToken
+            $responseBody = if ($isAuthorized) { $bodyBytes } else { $unauthorizedBytes }
+            $statusLine = if ($isTokenHandshake) { 'HTTP/1.1 303 See Other' } elseif ($isAuthorized) { 'HTTP/1.1 200 OK' } else { 'HTTP/1.1 401 Unauthorized' }
+            $redirectHeaders = if ($isTokenHandshake) { "Location: /`r`nSet-Cookie: dsh-auth-test=ok; Path=/`r`n" } else { '' }
+            $headerBytes = [Text.Encoding]::ASCII.GetBytes("$statusLine`r`n$redirectHeaders" + "Content-Type: text/html; charset=utf-8`r`nContent-Length: $($responseBody.Length)`r`nConnection: close`r`n`r`n")
             $stream.Write($headerBytes, 0, $headerBytes.Length)
-            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            $stream.Write($responseBody, 0, $responseBody.Length)
             $stream.Flush()
         } catch { } finally { $client.Close() }
     }
@@ -229,6 +251,15 @@ try {
         Assert-Equal $result.StartupToken $result.State.StartupToken 'READY state must retain the startup token'
         Assert-Equal $result.RuntimeRoot $result.State.RuntimeRoot 'READY state must retain the runtime root'
         Assert-Equal $result.Entrypoint $result.State.Entrypoint 'READY state must retain the exact entrypoint'
+    }
+
+    Invoke-Test 'token-protected DSH page becomes ready using the URL from the startup log' {
+        $result = Invoke-MonitorScenario -ScenarioName 'token-protected-dsh-page' `
+            -Body '<div id="root"></div>' -RequireToken
+        Assert-Equal 0 $result.ExitCode "A token-protected DSH page should become ready. Output:`n$($result.Output)"
+        Assert-Match $result.Events '(?m)^OPEN http://127\.0\.0\.1:\d+/\?token=test-token\r?\n$' `
+            'The monitor must open the token-protected DSH URL after readiness'
+        Assert-Equal 'READY' $result.State.State 'A token-protected DSH page must record READY'
     }
 
     Write-Host "All $script:Passed readiness monitor behavior tests passed."

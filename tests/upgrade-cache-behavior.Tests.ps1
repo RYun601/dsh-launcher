@@ -88,8 +88,17 @@ param(
     "VERSION=$Version;ROOT=$RuntimeRoot`r`n",
     [Text.Encoding]::ASCII
 )
+$launchLog = Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'
+New-Item -ItemType Directory -Force -Path (Split-Path $launchLog -Parent) | Out-Null
+Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value ('===== fake startup ' + $Version + ' =====')
+Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "DSH version: $Version"
 $exitCode = 0
-if ($env:DSH_TEST_START_FAIL_VERSION -and $Version -eq $env:DSH_TEST_START_FAIL_VERSION) { $exitCode = 1 }
+if ($env:DSH_TEST_START_FAIL_VERSION -and $Version -eq $env:DSH_TEST_START_FAIL_VERSION -and -not (Test-Path -LiteralPath $env:DSH_TEST_PLUGIN_REMOVE_MARKER)) {
+    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: dsh: plugin tree failed to load"
+    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry vision-toolkit (@dsh-external/dsh-vision-toolkit): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
+    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry better-sidebar (dsh-better-sidebar): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
+    $exitCode = 1
+}
 exit $exitCode
 '@,
         [Text.Encoding]::ASCII
@@ -101,7 +110,7 @@ exit $exitCode
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`nif defined DSH_TEST_NODE_VERSION (echo %DSH_TEST_NODE_VERSION%) else (echo v22.19.0)`r`nexit /b 0`r`n",
+        "@echo off`r`nif defined DSH_TEST_NODE_LOG echo %*>>`"%DSH_TEST_NODE_LOG%`"`r`necho %*| findstr /i /c:`" plugin `" >nul`r`nif not errorlevel 1 if defined DSH_TEST_PLUGIN_REMOVE_MARKER echo removed>`"%DSH_TEST_PLUGIN_REMOVE_MARKER%`"`r`nif defined DSH_TEST_NODE_VERSION (echo %DSH_TEST_NODE_VERSION%) else (echo v22.19.0)`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
@@ -132,7 +141,8 @@ function Invoke-UpgradeFixture {
     param(
         [pscustomobject]$Fixture,
         [string]$NodeVersion = '',
-        [string]$StartFailVersion = ''
+        [string]$StartFailVersion = '',
+        [string]$PromptAnswer = ''
     )
 
     $previousPath = $env:PATH
@@ -145,6 +155,8 @@ function Invoke-UpgradeFixture {
     $previousNpmLog = $env:DSH_TEST_NPM_LOG
     $previousStopMarker = $env:DSH_TEST_STOP_MARKER
     $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
+    $previousNodeLog = $env:DSH_TEST_NODE_LOG
+    $previousPluginRemoveMarker = $env:DSH_TEST_PLUGIN_REMOVE_MARKER
     try {
         $env:PATH = "$($Fixture.FakeBin);$previousPath"
         $env:APPDATA = $Fixture.AppData
@@ -156,8 +168,17 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_NPM_LOG = $Fixture.NpmLog
         $env:DSH_TEST_STOP_MARKER = $Fixture.StopMarker
         $env:DSH_TEST_NODE_VERSION = $NodeVersion
-        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
-            -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
+        $nodeLog = Join-Path $Fixture.Root 'node.log'
+        $pluginRemoveMarker = Join-Path $Fixture.Root 'plugin-removed.marker'
+        $env:DSH_TEST_NODE_LOG = $nodeLog
+        $env:DSH_TEST_PLUGIN_REMOVE_MARKER = $pluginRemoveMarker
+        if ($PromptAnswer) {
+            $output = @($PromptAnswer) | & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
+        } else {
+            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
+        }
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = [string]($output -join [Environment]::NewLine)
@@ -173,6 +194,8 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_NPM_LOG = $previousNpmLog
         $env:DSH_TEST_STOP_MARKER = $previousStopMarker
         $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
+        $env:DSH_TEST_NODE_LOG = $previousNodeLog
+        $env:DSH_TEST_PLUGIN_REMOVE_MARKER = $previousPluginRemoveMarker
     }
 }
 
@@ -343,6 +366,33 @@ try {
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
     }
 
+    Invoke-Test 'upgrade skips preparation and service restart when the current runtime is already latest' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-already-latest') `
+            -NpmLog (Join-Path $testRoot 'upgrade-already-latest-npm.log')
+        $launchDir = Join-Path $fixture.UserProfile 'dsh-launch'
+        $currentDir = Join-Path $launchDir 'runtime'
+        New-FakeReadyRuntimeAt -Root $currentDir -Version '0.1.0-rc.8'
+        $pointer = @{
+            SchemaVersion = 1
+            Current = @{ Path = 'runtime'; Version = '0.1.0-rc.8' }
+            Previous = $null
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $launchDir 'runtime-current.json'),
+            ($pointer | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture
+
+        Assert-Equal 0 $result.ExitCode "An already-latest runtime should make upgrade a no-op. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'already' 'The no-op result must be explicit'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'A no-op upgrade must not stop the service'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'A no-op upgrade must not restart the service'
+        Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A no-op upgrade must not install or upgrade global dsh'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-versions'))) 'A no-op upgrade must not prepare a candidate runtime'
+    }
+
     Invoke-Test 'candidate failure rolls back through the ready legacy runtime and clears the transaction' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-rollback') `
             -NpmLog (Join-Path $testRoot 'upgrade-rollback-npm.log') `
@@ -378,6 +428,39 @@ try {
             'A failed upgrade must clear its transaction'
         Assert-True (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-current.json')) `
             'The pointer must remain intact after a failed upgrade'
+    }
+
+    Invoke-Test 'confirmed incompatible plugins are removed and the candidate startup is retried' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-plugin-repair') `
+            -NpmLog (Join-Path $testRoot 'upgrade-plugin-repair-npm.log') `
+            -ResolvedVersion '0.1.2-alpha.3'
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture -StartFailVersion '0.1.2-alpha.3' -PromptAnswer 'Y'
+
+        Assert-Equal 0 $result.ExitCode "A confirmed plugin repair should allow the upgrade to succeed. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'dsh-vision-toolkit' 'The prompt must identify the incompatible vision plugin'
+        Assert-Match $result.Output 'dsh-better-sidebar' 'The prompt must identify the incompatible sidebar plugin'
+        Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Root 'plugin-removed.marker')) 'A confirmed repair must invoke the target runtime plugin removal command'
+        $nodeLog = Read-NpmLog (Join-Path $fixture.Root 'node.log')
+        Assert-Match $nodeLog 'plugin .*--profile web remove .*@dsh-external/dsh-vision-toolkit' 'The repair must remove the vision plugin from the web profile'
+        Assert-Match $nodeLog 'plugin .*--profile web remove .*dsh-better-sidebar' 'The repair must remove the sidebar plugin from the web profile'
+        $attempts = [IO.File]::ReadAllText($fixture.AttemptsLog)
+        Assert-Match $attempts '(?ms)^VERSION=0\.1\.2-alpha\.3;.*\r?\nVERSION=0\.1\.2-alpha\.3;' 'The candidate must be retried after incompatible plugins are removed'
+        Assert-Match $result.Output '0\.1\.2-alpha\.3' 'The repaired candidate must be committed after the retry'
+    }
+
+    Invoke-Test 'declining incompatible plugin removal preserves the plugins and rolls back' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-plugin-decline') `
+            -NpmLog (Join-Path $testRoot 'upgrade-plugin-decline-npm.log') `
+            -ResolvedVersion '0.1.2-alpha.3'
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture `
+            -StartFailVersion '0.1.2-alpha.3' -PromptAnswer 'N'
+
+        Assert-Equal 1 $result.ExitCode "Declining plugin removal must retain the existing rollback behavior. Output:`n$($result.Output)"
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.Root 'plugin-removed.marker'))) 'Declining the prompt must not remove any plugin'
+        $attempts = [IO.File]::ReadAllText($fixture.AttemptsLog)
+        Assert-NotMatch $attempts '(?ms)^VERSION=0\.1\.2-alpha\.3;.*\r?\nVERSION=0\.1\.2-alpha\.3;' 'Declining the prompt must not retry the candidate'
     }
 
     Invoke-Test 'explicit upgrade aborts without stopping the service when the target version cannot be resolved' {

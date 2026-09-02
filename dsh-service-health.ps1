@@ -210,19 +210,50 @@ function Test-DshStartupLockIdentity {
     }
 }
 
+function Get-DshStartupUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+
+    $logPath = Join-Path $LaunchRoot 'dsh-background.log'
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return '' }
+
+    try {
+        $logText = [IO.File]::ReadAllText($logPath, [Text.Encoding]::UTF8)
+    } catch {
+        return ''
+    }
+
+    $sectionMarkers = [regex]::Matches($logText, '(?m)^===== ')
+    if ($sectionMarkers.Count -gt 0) {
+        $logText = $logText.Substring($sectionMarkers[$sectionMarkers.Count - 1].Index)
+    }
+
+    $pattern = "(?im)^\s*dsh web:\s+(?<Url>http://127\.0\.0\.1:$Port(?:/\?token=[^\s]+)?)\s*$"
+    $matches = [regex]::Matches($logText, $pattern)
+    if ($matches.Count -eq 0) { return '' }
+    return [string]$matches[$matches.Count - 1].Groups['Url'].Value
+}
+
 function Invoke-DshHttpProbe {
     param(
         [Parameter(Mandatory = $true)]
         [ValidateRange(1, 65535)]
-        [int]$Port
+        [int]$Port,
+        [string]$Uri
     )
 
     $response = $null
     $failureMessage = ''
     try {
-        $request = [Net.HttpWebRequest]::Create("http://127.0.0.1:$Port/")
+        if ([string]::IsNullOrWhiteSpace($Uri)) { $Uri = "http://127.0.0.1:$Port/" }
+        $request = [Net.HttpWebRequest]::Create($Uri)
         $request.Method = 'GET'
-        $request.AllowAutoRedirect = $false
+        # DSH 0.1.2-alpha.4 exchanges the startup token for an auth cookie via
+        # 303 Location: /. Keep the cookie while following that redirect.
+        $request.AllowAutoRedirect = $true
+        $request.CookieContainer = [Net.CookieContainer]::new()
         $request.Timeout = 2000
         $request.ReadWriteTimeout = 2000
         $response = $request.GetResponse()
@@ -379,7 +410,8 @@ function Get-DshServiceClassification {
             -HttpStatus $null -Entrypoint $entrypoint
     }
 
-    $probe = Invoke-DshHttpProbe -Port $Port
+    $probeUri = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port
+    $probe = Invoke-DshHttpProbe -Port $Port -Uri $probeUri
     if (-not $probe.IsReady) {
         return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
             -Message $probe.Message -HttpStatus $probe.StatusCode -Entrypoint $entrypoint
