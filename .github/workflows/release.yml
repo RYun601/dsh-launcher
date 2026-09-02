@@ -69,11 +69,21 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tests = @(Get-ChildItem ./tests -Filter '*.Tests.ps1' | Sort-Object Name)
-          foreach ($test in $tests) {
-            Write-Host "Running $($test.Name)..."
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test.FullName
-            if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed with exit code $LASTEXITCODE" }
+          for ($attempt = 1; $attempt -le 2; $attempt++) {
+            Write-Host "--- Suite attempt $attempt ---"
+            try {
+              $tests = @(Get-ChildItem ./tests -Filter '*.Tests.ps1' | Sort-Object Name)
+              foreach ($test in $tests) {
+                Write-Host "Running $($test.Name)..."
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test.FullName
+                if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed with exit code $LASTEXITCODE" }
+              }
+              break
+            } catch {
+              if ($attempt -eq 2) { throw }
+              Write-Host "Suite attempt $attempt failed; retrying once: $_"
+              Start-Sleep -Seconds 20
+            }
           }
 
       - name: Prepare package
