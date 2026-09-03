@@ -86,12 +86,20 @@ function Get-DshAttachedStartupSnapshot {
 function Test-DshAttachedStartupIdentity {
     param([object]$Snapshot)
 
-    if (-not $Snapshot -or -not $Snapshot.LockIsLive -or -not $Snapshot.Lock -or -not $Snapshot.StartupState) {
+    if (-not $Snapshot -or -not $Snapshot.LockIsLive -or -not $Snapshot.Lock) {
         return $false
     }
-    $state = $Snapshot.StartupState
     $lock = $Snapshot.Lock
-    if ($state.State -ne 'STARTING' -or -not $state.StartupToken -or -not $state.RuntimeRoot -or -not $state.Entrypoint) {
+    # 锁已建立但状态文件尚未写入（启动初始化中间态）：锁本身即身份证据，
+    # 视为同一启动所有者附着，避免误报身份不一致。
+    if (-not $Snapshot.StartupState) {
+        return $lock.OwnerPid -gt 0
+    }
+    $state = $Snapshot.StartupState
+    # 锁与状态身份一致即视为同一启动所有者：启动中（STARTING）、已就绪（READY）
+    # 或已失败（FAILED）都允许附着并传播对应结果，仅身份矛盾才拒绝。
+    if ($state.State -notin @('STARTING', 'READY', 'FAILED') -or
+            -not $state.StartupToken -or -not $state.RuntimeRoot -or -not $state.Entrypoint) {
         return $false
     }
     $stateRunnerPid = if ($state.RunnerPid) { [int]$state.RunnerPid } elseif ($state.Pid) { [int]$state.Pid } else { 0 }
@@ -184,6 +192,35 @@ function Wait-DshStartup {
     return 1
 }
 
+# 锁存在且身份一致时按启动状态传播结果：READY 复用已有实例（打开浏览器）、
+# FAILED 传播失败原因、STARTING 附着等待。任何分支都不得提交第二个 runner。
+function Invoke-AttachedStartupAction {
+    param(
+        [Parameter(Mandatory = $true)][object]$Snapshot,
+        [Parameter(Mandatory = $true)][int]$ExistingOwnerPid
+    )
+
+    $state = $Snapshot.StartupState
+    if ($state -and $state.State -eq 'READY') {
+        $pidSuffix = if ($state.ServicePid) { "（PID $($state.ServicePid)）" } else { '' }
+        Write-Host "[REUSE] 端口 $Port 已有 DeepSeek Harness 实例$pidSuffix，无需重复启动"
+        Write-Host '正在打开浏览器...'
+        Start-Process $url
+        return 0
+    }
+    if ($state -and $state.State -eq 'FAILED') {
+        $reason = if ($state.Message) { [string]$state.Message } else { '后台启动失败' }
+        Write-StartupFailure "启动失败：$reason"
+        return 1
+    }
+    Write-Host "DeepSeek Harness 已在启动中（PID $ExistingOwnerPid），未重复提交启动任务"
+    Write-Host "查看状态：deepseek --status"
+    Write-Host "查看日志：deepseek --logs"
+    if (-not $WaitForReady) { return 0 }
+    Write-Host '正在等待现有启动任务完成...'
+    return (Wait-DshStartup -OwnerPid $ExistingOwnerPid -HeartbeatSeconds $HeartbeatSeconds)
+}
+
 # A live launcher-owned lock means npx is already installing or starting DSH.
 # Do not submit another process that would contend for the same npx workspace.
 $lockStatus = @(& $stateHelper -Action TestStartupLock -LaunchRoot $launchRoot)
@@ -200,12 +237,7 @@ if ($lockText -match '^LOCKED\s+(\d+)') {
         Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
         exit 1
     }
-    Write-Host "DeepSeek Harness 已在启动中（PID $existingOwnerPid），未重复提交启动任务"
-    Write-Host "查看状态：deepseek --status"
-    Write-Host "查看日志：deepseek --logs"
-    if (-not $WaitForReady) { exit 0 }
-    Write-Host '正在等待现有启动任务完成...'
-    exit (Wait-DshStartup -OwnerPid $existingOwnerPid -HeartbeatSeconds $HeartbeatSeconds)
+    exit (Invoke-AttachedStartupAction -Snapshot $attachedSnapshot -ExistingOwnerPid $existingOwnerPid)
 }
 
 # 0) 端口预检：共享 classifier 同时核对端口所有者、精确入口参数、
@@ -267,11 +299,7 @@ if ($LASTEXITCODE -eq 2) {
         Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
         exit 1
     }
-    Write-Host "DeepSeek Harness 已在启动中（PID $owner），未重复提交启动任务"
-    if ($WaitForReady -and $owner -match '^\d+$') {
-        exit (Wait-DshStartup -OwnerPid ([int]$owner))
-    }
-    exit 0
+    exit (Invoke-AttachedStartupAction -Snapshot $attachedSnapshot -ExistingOwnerPid ([int]$owner))
 }
 if ($LASTEXITCODE -ne 0) {
     Write-StartupFailure '启动失败：无法预留后台启动状态。'
@@ -328,10 +356,7 @@ if ($LASTEXITCODE -eq 2) {
         Write-StartupFailure '启动失败：现有启动锁与状态身份不一致，拒绝附着。'
         exit 1
     }
-    Write-Host "DeepSeek Harness 已在启动中（PID $owner），未重复提交启动任务"
-    Write-Host '查看状态：deepseek --status'
-    Write-Host '查看日志：deepseek --logs'
-    exit 0
+    exit (Invoke-AttachedStartupAction -Snapshot $attachedSnapshot -ExistingOwnerPid ([int]$owner))
 }
 if ($LASTEXITCODE -ne 0) {
     [IO.File]::WriteAllText($gatePath, 'CANCEL', [Text.Encoding]::ASCII)

@@ -114,7 +114,7 @@ function global:Get-CimInstance {
             ExecutablePath = 'C:\apps\other-server.exe'
         }
     }
-    $serviceParentPid = if ($global:DshTestScenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
+    $serviceParentPid = if ($global:DshTestScenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedReady')) {
         $PID
     } else {
         $global:DshTestRunnerPid
@@ -201,7 +201,7 @@ if ($Scenario -eq 'Staged') {
 }
 
 $testStartupToken = '22222222222222222222222222222222'
-if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed')) {
+if ($Scenario -in @('Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedReady')) {
     $lockDirectory = Join-Path $ProfilePath 'dsh-launch\dsh-startup.lock'
     New-Item -ItemType Directory -Force -Path $lockDirectory | Out-Null
     Set-Content -LiteralPath (Join-Path $lockDirectory 'pid.txt') -Value $PID -Encoding ASCII

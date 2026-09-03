@@ -679,12 +679,48 @@ function Write-StatusWithoutProbe {
     Write-Output 'STOPPED'
 }
 
+function Invoke-StatusProbe {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$ProbeKind,
+        [Parameter(Mandatory = $true)][int]$ServicePort,
+        [Parameter(Mandatory = $true)][string]$LaunchRoot
+    )
+
+    if (-not $ProbeKind) { return $null }
+    $state = $Snapshot.StartupState
+    $runnerPid = $Snapshot.RunnerPid
+    if (-not $state -or -not $state.Entrypoint -or -not $state.StartupToken -or $runnerPid -le 0) {
+        return $null
+    }
+    if ($ProbeKind -eq 'classify') {
+        return Get-DshServiceClassification -Port $ServicePort `
+            -ExpectedEntrypoint ([string]$state.Entrypoint) `
+            -ExpectedStartupToken ([string]$state.StartupToken) `
+            -RunnerPid $runnerPid -LaunchRoot $LaunchRoot
+    }
+    if ($ProbeKind -eq 'wait') {
+        return Wait-DshServiceIdentity -Port $ServicePort `
+            -ExpectedEntrypoint ([string]$state.Entrypoint) `
+            -ExpectedStartupToken ([string]$state.StartupToken) `
+            -RunnerPid $runnerPid -LaunchRoot $LaunchRoot `
+            -StableMilliseconds 250 -PollMilliseconds 50
+    }
+    return $null
+}
+
 function Write-Status {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Paths,
         [int]$ServicePort = 3080
     )
 
+    # 会话探测策略：READY 状态走一次性分类（CLASSIFY）；带有缓存版本记录的
+    # STARTING（与活锁身份一致）走等待式探测（WAIT），探测到 READY 时允许
+    # 把该缓存启动推进为 READY。无版本记录的新 STARTING 不探测、不推进，
+    # 首个 READY 由就绪监视器独占发布。探测期间身份如发生变化，沿用同一
+    # 策略对最新快照重新确认，并用新结果完成本次输出（防 ABA）。
+    $probeKind = ''
     for ($attempt = 0; $attempt -lt 3; $attempt++) {
         $guard = Enter-StartupLockGuard -Paths $Paths
         try {
@@ -699,16 +735,29 @@ function Write-Status {
         $hasStartupEvidence = $startupState -and $startupState.Entrypoint -and
             $startupState.StartupToken -and $runnerPid -gt 0
         $startingLockMatchesState = Test-StatusLockMatchesState -Snapshot $snapshot
-        if ($hasStartupEvidence -and $startupState.State -eq 'READY') {
+        if (-not $probeKind -and $hasStartupEvidence) {
             if ($startupState.State -eq 'READY') {
-                $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
-                if ($recordedServicePid -gt 0) {
-                    $classification = Get-DshServiceClassification -Port $ServicePort `
-                        -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
-                        -ExpectedStartupToken ([string]$startupState.StartupToken) `
-                        -RunnerPid $runnerPid -LaunchRoot $Paths.Root
-                }
+                $probeKind = 'classify'
+            } elseif ($startupState.State -eq 'STARTING' -and $startingLockMatchesState -and
+                    $startupState.Version) {
+                $probeKind = 'wait'
             }
+        }
+        if ($probeKind -eq 'classify' -and $hasStartupEvidence -and $startupState.State -eq 'READY') {
+            $recordedServicePid = if ($startupState.ServicePid) { [int]$startupState.ServicePid } else { 0 }
+            if ($recordedServicePid -gt 0) {
+                $classification = Get-DshServiceClassification -Port $ServicePort `
+                    -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
+                    -ExpectedStartupToken ([string]$startupState.StartupToken) `
+                    -RunnerPid $runnerPid -LaunchRoot $Paths.Root
+            }
+        } elseif ($probeKind -eq 'wait' -and $hasStartupEvidence -and
+                $startupState.State -eq 'STARTING' -and $startingLockMatchesState) {
+            $classification = Wait-DshServiceIdentity -Port $ServicePort `
+                -ExpectedEntrypoint ([string]$startupState.Entrypoint) `
+                -ExpectedStartupToken ([string]$startupState.StartupToken) `
+                -RunnerPid $runnerPid -LaunchRoot $Paths.Root `
+                -StableMilliseconds 250 -PollMilliseconds 50
         }
 
         if ($classification) {
@@ -718,34 +767,54 @@ function Write-Status {
         $guard = Enter-StartupLockGuard -Paths $Paths
         try {
             $currentSnapshot = Get-StartupStatusSnapshot -Paths $Paths
+            $applySnapshot = $currentSnapshot
+            $applyClassification = $classification
             if (-not (Test-StartupStatusSnapshotMatch -Expected $snapshot -Actual $currentSnapshot)) {
-                continue
+                # 探测期间启动身份已变化：不能采用旧快照的探测结论，改用本次
+                # 探测策略对最新快照重新确认，并用新结果完成本次输出（防 ABA）。
+                $revalidated = Invoke-StatusProbe -Snapshot $currentSnapshot `
+                    -ProbeKind $probeKind -ServicePort $ServicePort -LaunchRoot $Paths.Root
+                $applyClassification = $revalidated
             }
 
-            if ($startupState -and $startupState.State -eq 'READY' -and
-                    (-not $startupState.ServicePid -or [int]$startupState.ServicePid -le 0)) {
+            $applyState = $applySnapshot.StartupState
+            $applyRunnerPid = $applySnapshot.RunnerPid
+            if ($applyState -and $applyState.State -eq 'READY' -and
+                    (-not $applyState.ServicePid -or [int]$applyState.ServicePid -le 0)) {
                 Write-Output 'UNHEALTHY (stored READY state has no service PID evidence)'
                 return
             }
-            if ($classification -and $startupState.State -eq 'READY' -and
-                    $classification.State -eq 'READY' -and
-                    [int]$classification.ServicePid -ne [int]$startupState.ServicePid) {
-                Write-Output "UNHEALTHY - PID $($classification.ServicePid) (service identity changed)"
+            if ($applyClassification -and $applyState -and $applyState.State -eq 'READY' -and
+                    $applyClassification.State -eq 'READY' -and
+                    [int]$applyClassification.ServicePid -ne [int]$applyState.ServicePid) {
+                Write-Output "UNHEALTHY - PID $($applyClassification.ServicePid) (service identity changed)"
                 return
             }
-            if ($classification -and $classification.State -eq 'READY') {
-                Write-Output "READY - PID $($classification.ServicePid)"
+            if ($applyClassification -and $applyClassification.State -eq 'READY') {
+                if ($applyState -and $applyState.State -eq 'STARTING') {
+                    # 带缓存版本记录且与活锁身份一致的 STARTING，探测确认 READY
+                    # 后才允许推进；无版本记录的新 STARTING 永不进入此分支。
+                    Write-StartupStateFile -Paths $Paths -NewState 'READY' `
+                        -NewOwnerPid $applyRunnerPid `
+                        -NewServicePid ([int]$applyClassification.ServicePid) `
+                        -NewVersion ([string]$applyState.Version) `
+                        -NewMessage ([string]$applyClassification.Message) `
+                        -NewExitCode 0 -NewStartupToken ([string]$applyState.StartupToken) `
+                        -NewRuntimeRoot ([string]$applyState.RuntimeRoot) `
+                        -NewEntrypoint ([string]$applyState.Entrypoint)
+                }
+                Write-Output "READY - PID $($applyClassification.ServicePid)"
                 return
             }
-            if ($classification -and
-                    ($startupState.State -eq 'READY' -or $classification.State -in @('FOREIGN_PORT', 'UNHEALTHY'))) {
-                $pidSuffix = if ($classification.ServicePid) { " - PID $($classification.ServicePid)" } else { '' }
-                $messageSuffix = if ($classification.Message) { " ($($classification.Message))" } else { '' }
-                Write-Output "$($classification.State)$pidSuffix$messageSuffix"
+            if ($applyClassification -and
+                    ($applyState -and $applyState.State -eq 'READY' -or $applyClassification.State -in @('FOREIGN_PORT', 'UNHEALTHY'))) {
+                $pidSuffix = if ($applyClassification.ServicePid) { " - PID $($applyClassification.ServicePid)" } else { '' }
+                $messageSuffix = if ($applyClassification.Message) { " ($($applyClassification.Message))" } else { '' }
+                Write-Output "$($applyClassification.State)$pidSuffix$messageSuffix"
                 return
             }
 
-            Write-StatusWithoutProbe -Paths $Paths -Snapshot $currentSnapshot
+            Write-StatusWithoutProbe -Paths $Paths -Snapshot $applySnapshot
             return
         } finally {
             Exit-StartupLockGuard -Guard $guard

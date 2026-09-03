@@ -212,10 +212,12 @@ function Test-DshStartupLockIdentity {
 
 function Get-DshStartupUrl {
     param(
-        [Parameter(Mandatory = $true)][string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LaunchRoot,
         [Parameter(Mandatory = $true)][int]$Port
     )
 
+    # 无启动根目录（如外部调用方）时优雅回退到默认探测地址。
+    if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return '' }
     $logPath = Join-Path $LaunchRoot 'dsh-background.log'
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return '' }
 
