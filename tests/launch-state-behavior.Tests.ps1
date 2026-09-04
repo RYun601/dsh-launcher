@@ -105,13 +105,48 @@ function New-ClassifierFixture {
     param(
         [Parameter(Mandatory = $true)][string]$Name,
         [Parameter(Mandatory = $true)][string]$ClassificationState,
-        [Parameter(Mandatory = $true)][int]$ServicePid
+        [Parameter(Mandatory = $true)][int]$ServicePid,
+        [switch]$StubStartupOwnerQuery
     )
 
     $fixtureRoot = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Force -Path $fixtureRoot | Out-Null
     $helperPath = Join-Path $fixtureRoot 'dsh-launch-state.ps1'
     Copy-Item -LiteralPath $stateHelper -Destination $helperPath
+    if ($StubStartupOwnerQuery) {
+        $ownerQueryStub = @'
+$script:StartupOwnerQueryAttempts = 0
+function Get-CimInstance {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)][string]$ClassName,
+        [string]$Filter
+    )
+
+    $script:StartupOwnerQueryAttempts++
+    $failureCount = 0
+    [void][int]::TryParse([string]$env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, [ref]$failureCount)
+    if ($script:StartupOwnerQueryAttempts -le $failureCount) {
+        throw 'Injected startup owner identity lookup failure'
+    }
+
+    return [pscustomobject]@{
+        ExecutablePath = [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH
+        CommandLine = 'powershell.exe -File "' + [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH + '"'
+    }
+}
+'@
+        $marker = '$ErrorActionPreference = ''Stop'''
+        $helperContents = [IO.File]::ReadAllText($helperPath)
+        if (-not $helperContents.Contains($marker)) {
+            throw 'Unable to install the startup owner query fixture'
+        }
+        $helperContents = $helperContents.Replace(
+            $marker,
+            $marker + [Environment]::NewLine + [Environment]::NewLine + $ownerQueryStub
+        )
+        [IO.File]::WriteAllText($helperPath, $helperContents, [Text.UTF8Encoding]::new($false))
+    }
     $tracePath = Join-Path $fixtureRoot 'classifier-trace.txt'
     $healthPath = Join-Path $fixtureRoot 'dsh-service-health.ps1'
 $healthScript = @'
@@ -204,6 +239,248 @@ try {
             if ($coordinator -and -not $coordinator.HasExited) {
                 Stop-Process -Id $coordinator.Id -Force -ErrorAction SilentlyContinue
                 $coordinator.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'status retains a startup lock when the owner identity lookup is unavailable' {
+        $launchRoot = Join-Path $testRoot 'starting-owner-query-unavailable'
+        $startupToken = '10101010101010101010101010101010'
+        $fixture = New-ClassifierFixture -Name 'owner-query-unavailable' -ClassificationState 'STOPPED' `
+            -ServicePid 0 -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'owner-query-unavailable-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $lockDirectory = Join-Path $launchRoot 'dsh-startup.lock'
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+            $write = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $write.ExitCode "The STARTING state should be written. Output:`n$($write.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '99'
+            try {
+                $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', 31989
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $status.ExitCode "Status lookup should succeed. Output:`n$($status.Output)"
+            Assert-Match $status.Output "STARTING - PID $($runner.Id)" `
+                'An unavailable owner lookup must not report a valid startup as STOPPED'
+            Assert-True (Test-Path -LiteralPath $lockDirectory) `
+                'An unavailable owner lookup must not delete the authoritative startup lock'
+            $state = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'STARTING' $state.State 'Status must not alter the startup state while owner lookup is unavailable'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'status does not promote cached STARTING when owner identity lookup is unavailable' {
+        $launchRoot = Join-Path $testRoot 'cached-starting-owner-query-unavailable'
+        $startupToken = '11111111111111111111111111111110'
+        $servicePid = 6401
+        $fixture = New-ClassifierFixture -Name 'cached-owner-query-unavailable' -ClassificationState 'READY' `
+            -ServicePid $servicePid -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'cached-owner-query-unavailable-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+            $write = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-Version', '0.1.0-rc.8',
+                '-StartupToken', $startupToken, '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $write.ExitCode "The cached STARTING state should be written. Output:`n$($write.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '99'
+            $env:DSH_TEST_CLASSIFIER_TRACE = $fixture.TracePath
+            $env:DSH_TEST_CLASSIFIER_STATE = $fixture.State
+            $env:DSH_TEST_CLASSIFIER_PID = [string]$fixture.ServicePid
+            $env:DSH_TEST_CLASSIFIER_ENTRYPOINT = $entrypoint
+            try {
+                $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', 31988
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                    Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, `
+                    Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $status.ExitCode "Status lookup should succeed. Output:`n$($status.Output)"
+            Assert-Match $status.Output "STARTING - PID $($runner.Id)" `
+                'An unavailable owner lookup must not allow a cached STARTING state to publish READY'
+            Assert-True (-not (Test-Path -LiteralPath $fixture.TracePath)) `
+                'Status must not probe a cached STARTING state while its lock owner is unverified'
+            $state = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'STARTING' $state.State 'An unverified lock owner must not advance the cached startup state'
+            Assert-Equal 0 $state.ServicePid 'An unverified lock owner must not pin a service PID'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, `
+                Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'retries a transient owner identity lookup before treating the lock as unverified' {
+        $launchRoot = Join-Path $testRoot 'transient-owner-query-failure'
+        $startupToken = '12121212121212121212121212121212'
+        $fixture = New-ClassifierFixture -Name 'transient-owner-query-failure' -ClassificationState 'STOPPED' `
+            -ServicePid 0 -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'transient-owner-query-failure-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '1'
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH = $powerShellPath
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH = $runnerScript
+            try {
+                $snapshotResult = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'GetStartupSnapshot', '-LaunchRoot', $launchRoot
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $snapshotResult.ExitCode "Startup snapshot should succeed. Output:`n$($snapshotResult.Output)"
+            $snapshot = $snapshotResult.Output | ConvertFrom-Json
+            Assert-Equal 'ALIVE' $snapshot.LockOwnerStatus `
+                'A transient owner lookup failure must retry and recover the verified lock identity'
+            Assert-True ([bool]$snapshot.LockIsLive) 'A recovered owner identity must keep the lock live'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'status tolerates owner verification recovery without a health probe' {
+        $launchRoot = Join-Path $testRoot 'owner-query-recovery-without-probe'
+        $startupToken = '14141414141414141414141414141414'
+        $fixture = New-ClassifierFixture -Name 'owner-query-recovery-without-probe' -ClassificationState 'STOPPED' `
+            -ServicePid 0 -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'owner-query-recovery-without-probe-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+            $write = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $write.ExitCode "The STARTING state should be written. Output:`n$($write.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '3'
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH = $powerShellPath
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH = $runnerScript
+            try {
+                $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', 31987
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $status.ExitCode "Status lookup should succeed after owner verification recovers. Output:`n$($status.Output)"
+            Assert-Match $status.Output "STARTING - PID $($runner.Id)" `
+                'Recovery from an unavailable owner lookup must not require a health probe'
+            $state = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'STARTING' $state.State 'Recovery without a probe must preserve STARTING'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'startup lock remains reserved when owner identity lookup is unavailable' {
+        $launchRoot = Join-Path $testRoot 'startup-lock-owner-query-unavailable'
+        $startupToken = '13131313131313131313131313131313'
+        $fixture = New-ClassifierFixture -Name 'startup-lock-owner-query-unavailable' -ClassificationState 'STOPPED' `
+            -ServicePid 0 -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'startup-lock-owner-query-unavailable-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $lockDirectory = Join-Path $launchRoot 'dsh-startup.lock'
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '99'
+            try {
+                $lockStatus = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'TestStartupLock', '-LaunchRoot', $launchRoot
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $lockStatus.ExitCode "Startup lock lookup should succeed. Output:`n$($lockStatus.Output)"
+            Assert-Equal "LOCKED $($runner.Id)" $lockStatus.Output `
+                'An unavailable owner lookup must keep the startup reservation locked'
+            Assert-True (Test-Path -LiteralPath $lockDirectory) `
+                'An unavailable owner lookup must not release the startup reservation'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
             }
         }
     }

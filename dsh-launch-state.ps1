@@ -145,7 +145,7 @@ function Exit-StartupLockGuard {
     }
 }
 
-function Test-StartupOwnerAlive {
+function Get-StartupOwnerStatus {
     param(
         [int]$ProcessId,
         [string]$ExpectedCommandPath,
@@ -155,16 +155,27 @@ function Test-StartupOwnerAlive {
     $normalizedCommandPath = ConvertTo-NormalizedPath -Path $ExpectedCommandPath
     $normalizedScriptPath = ConvertTo-NormalizedPath -Path $ExpectedScriptPath
     if ($ProcessId -le 0 -or -not $normalizedCommandPath -or -not $normalizedScriptPath) {
-        return $false
+        return 'STALE'
     }
 
-    try {
-        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
-    } catch {
-        return $false
+    $process = $null
+    $querySucceeded = $false
+    for ($attempt = 0; $attempt -lt 3; $attempt++) {
+        try {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+            $querySucceeded = $true
+            break
+        } catch {
+            if ($attempt -lt 2) {
+                Start-Sleep -Milliseconds 50
+            }
+        }
+    }
+    if (-not $querySucceeded) {
+        return 'UNKNOWN'
     }
     if (-not $process) {
-        return $false
+        return 'STALE'
     }
 
     $actualCommandPath = ConvertTo-NormalizedPath -Path ([string]$process.ExecutablePath)
@@ -172,11 +183,25 @@ function Test-StartupOwnerAlive {
             $actualCommandPath,
             $normalizedCommandPath,
             [StringComparison]::OrdinalIgnoreCase)) {
-        return $false
+        return 'STALE'
     }
 
-    return Test-DshCommandLineArgument -CommandLine ([string]$process.CommandLine) `
-        -ExpectedPath $normalizedScriptPath
+    if (Test-DshCommandLineArgument -CommandLine ([string]$process.CommandLine) `
+            -ExpectedPath $normalizedScriptPath) {
+        return 'ALIVE'
+    }
+    return 'STALE'
+}
+
+function Test-StartupOwnerAlive {
+    param(
+        [int]$ProcessId,
+        [string]$ExpectedCommandPath,
+        [string]$ExpectedScriptPath
+    )
+
+    return (Get-StartupOwnerStatus -ProcessId $ProcessId `
+            -ExpectedCommandPath $ExpectedCommandPath -ExpectedScriptPath $ExpectedScriptPath) -eq 'ALIVE'
 }
 
 function Get-StartupLockInfo {
@@ -370,8 +395,9 @@ function Remove-StaleStartupLock {
     if (-not $lock.Exists) {
         return $false
     }
-    if (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-            -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath) {
+    $ownerStatus = Get-StartupOwnerStatus -ProcessId $lock.OwnerPid `
+        -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath
+    if ($ownerStatus -ne 'STALE') {
         return $false
     }
     if (Test-StartupLockInitializing -Paths $Paths -LockInfo $lock) {
@@ -536,12 +562,23 @@ function Get-StartupStatusSnapshot {
     param([Parameter(Mandatory = $true)][pscustomobject]$Paths)
 
     $lock = Get-StartupLockInfo -Paths $Paths
-    $lockIsLive = $lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-        -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)
-    if ($lock.Exists -and -not $lockIsLive) {
+    $ownerStatus = if ($lock.Exists) {
+        Get-StartupOwnerStatus -ProcessId $lock.OwnerPid `
+            -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath
+    } else {
+        'MISSING'
+    }
+    $lockIsLive = $lock.Exists -and $ownerStatus -in @('ALIVE', 'UNKNOWN')
+    if ($lock.Exists -and $ownerStatus -eq 'STALE') {
         Remove-StaleStartupLock -Paths $Paths | Out-Null
         $lock = Get-StartupLockInfo -Paths $Paths
-        $lockIsLive = $false
+        $ownerStatus = if ($lock.Exists) {
+            Get-StartupOwnerStatus -ProcessId $lock.OwnerPid `
+                -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath
+        } else {
+            'MISSING'
+        }
+        $lockIsLive = $lock.Exists -and $ownerStatus -in @('ALIVE', 'UNKNOWN')
     }
     $startupState = Read-StartupState -Paths $Paths
     $runnerPid = if ($startupState -and $startupState.RunnerPid) {
@@ -555,6 +592,7 @@ function Get-StartupStatusSnapshot {
     return [pscustomobject]@{
         Lock = $lock
         LockIsLive = $lockIsLive
+        LockOwnerStatus = $ownerStatus
         StartupState = $startupState
         RunnerPid = $runnerPid
     }
@@ -565,7 +603,8 @@ function Test-StatusLockMatchesState {
 
     $startupState = $Snapshot.StartupState
     return $startupState -and $startupState.State -eq 'STARTING' -and
-        $Snapshot.LockIsLive -and $Snapshot.Lock.OwnerPid -eq $Snapshot.RunnerPid -and
+        $Snapshot.LockIsLive -and $Snapshot.LockOwnerStatus -eq 'ALIVE' -and
+        $Snapshot.Lock.OwnerPid -eq $Snapshot.RunnerPid -and
         [string]::Equals(
             [string]$Snapshot.Lock.Token,
             [string]$startupState.StartupToken,
@@ -579,6 +618,9 @@ function Test-StartupStatusSnapshotMatch {
     )
 
     if ($Expected.LockIsLive -ne $Actual.LockIsLive) {
+        return $false
+    }
+    if ($Expected.LockOwnerStatus -ne $Actual.LockOwnerStatus) {
         return $false
     }
     foreach ($propertyName in @('Exists', 'OwnerPid', 'Token', 'CommandPath', 'ScriptPath', 'CreatedAt')) {
@@ -682,7 +724,7 @@ function Write-StatusWithoutProbe {
 function Invoke-StatusProbe {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Snapshot,
-        [Parameter(Mandatory = $true)][string]$ProbeKind,
+        [AllowEmptyString()][string]$ProbeKind,
         [Parameter(Mandatory = $true)][int]$ServicePort,
         [Parameter(Mandatory = $true)][string]$LaunchRoot
     )
@@ -894,8 +936,13 @@ switch ($Action) {
         $guard = Enter-StartupLockGuard -Paths $paths
         try {
             $lock = Get-StartupLockInfo -Paths $paths
-            if ($lock.Exists -and (Test-StartupOwnerAlive -ProcessId $lock.OwnerPid `
-                    -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath)) {
+            $ownerStatus = if ($lock.Exists) {
+                Get-StartupOwnerStatus -ProcessId $lock.OwnerPid `
+                    -ExpectedCommandPath $lock.CommandPath -ExpectedScriptPath $lock.ScriptPath
+            } else {
+                'MISSING'
+            }
+            if ($lock.Exists -and $ownerStatus -in @('ALIVE', 'UNKNOWN')) {
                 Write-Output "LOCKED $($lock.OwnerPid)"
             } else {
                 if ($lock.Exists) {
