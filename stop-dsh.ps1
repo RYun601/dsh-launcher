@@ -23,28 +23,42 @@ $stopped = @()
 # 已尝试结束但未成功的 PID：既用于避免重复 taskkill，也用于最终失败诊断。
 $killedFailures = @()
 
-function Test-DshLauncherProcess {
+function Get-DshLauncherProcessState {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
-    if (-not $process) { return $false }
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+    } catch {
+        return 'UNKNOWN'
+    }
+    if (-not $process) { return 'GONE' }
     $commandLine = [string]$process.CommandLine
-    return $commandLine -match '(?i)(background-run\.(?:cmd|ps1)|run-dsh\.ps1|@deepseek-ai[\\/]dsh|[\\/]dsh[\\/]lib[\\/]bin\.js)'
+    if ($commandLine -match '(?i)(background-run\.(?:cmd|ps1)|run-dsh\.ps1|@deepseek-ai[\\/]dsh|[\\/]dsh[\\/]lib[\\/]bin\.js)') {
+        return 'ALIVE'
+    }
+    return 'OTHER'
 }
 
 function Stop-DshProcessTree {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
-    if (-not (Test-DshLauncherProcess -ProcessId $ProcessId)) { return $false }
+    if ((Get-DshLauncherProcessState -ProcessId $ProcessId) -ne 'ALIVE') { return $false }
     & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        # 进程可能在身份校验和 taskkill 之间自行退出；此时停止目标已经达成。
-        # 端口与启动锁仍会在调用方的条件等待中再次确认，避免把子进程残留误判为成功。
-        if (-not (Test-DshLauncherProcess -ProcessId $ProcessId)) {
-            $global:LASTEXITCODE = 0
-            return $true
+        $taskkillExitCode = $LASTEXITCODE
+        # 先杀服务 PID 可能会让 runner 进入正常收尾；在这个短窗口内，
+        # taskkill 会返回失败但 runner 仍暂时可被查询。等待身份消失后再
+        # 判定为竞态成功，真正仍存活的 runner 仍会按失败处理。
+        $raceDeadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Min(1000, $WaitTimeoutMilliseconds))
+        while ($true) {
+            if ((Get-DshLauncherProcessState -ProcessId $ProcessId) -eq 'GONE') {
+                $global:LASTEXITCODE = 0
+                return $true
+            }
+            if ([DateTime]::UtcNow -ge $raceDeadline) { break }
+            Start-Sleep -Milliseconds 50
         }
-        Write-Host "[ERROR] 结束 DSH 进程失败：taskkill /PID $ProcessId 返回退出码 $LASTEXITCODE。"
+        Write-Host "[ERROR] 结束 DSH 进程失败：taskkill /PID $ProcessId 返回退出码 $taskkillExitCode。"
         return 'failed'
     }
     return $true
