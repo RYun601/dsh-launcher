@@ -130,9 +130,12 @@ function Get-CimInstance {
         throw 'Injected startup owner identity lookup failure'
     }
 
+    $launchRoot = [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT
+    $identityPath = Join-Path (Join-Path $launchRoot 'dsh-startup.lock') 'identity.json'
+    $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
     return [pscustomobject]@{
-        ExecutablePath = [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH
-        CommandLine = 'powershell.exe -File "' + [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH + '"'
+        ExecutablePath = [string]$identity.CommandPath
+        CommandLine = 'powershell.exe -File "' + [string]$identity.ScriptPath + '"'
     }
 }
 '@
@@ -283,8 +286,7 @@ try {
             Assert-Equal 'STARTING' $state.State 'Status must not alter the startup state while owner lookup is unavailable'
         } finally {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
@@ -341,8 +343,7 @@ try {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
                 Env:\DSH_TEST_CLASSIFIER_TRACE, Env:\DSH_TEST_CLASSIFIER_STATE, `
                 Env:\DSH_TEST_CLASSIFIER_PID, Env:\DSH_TEST_CLASSIFIER_ENTRYPOINT, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
@@ -366,16 +367,14 @@ try {
             Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
 
             $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '1'
-            $env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH = $powerShellPath
-            $env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH = $runnerScript
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT = $launchRoot
             try {
                 $snapshotResult = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
                     '-Action', 'GetStartupSnapshot', '-LaunchRoot', $launchRoot
                 )
             } finally {
                 Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             }
 
             Assert-Equal 0 $snapshotResult.ExitCode "Startup snapshot should succeed. Output:`n$($snapshotResult.Output)"
@@ -385,8 +384,7 @@ try {
             Assert-True ([bool]$snapshot.LockIsLive) 'A recovered owner identity must keep the lock live'
         } finally {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
@@ -416,16 +414,14 @@ try {
             Assert-Equal 0 $write.ExitCode "The STARTING state should be written. Output:`n$($write.Output)"
 
             $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '3'
-            $env:DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH = $powerShellPath
-            $env:DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH = $runnerScript
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT = $launchRoot
             try {
                 $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
                     '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', 31987
                 )
             } finally {
                 Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             }
 
             Assert-Equal 0 $status.ExitCode "Status lookup should succeed after owner verification recovers. Output:`n$($status.Output)"
@@ -435,8 +431,7 @@ try {
             Assert-Equal 'STARTING' $state.State 'Recovery without a probe must preserve STARTING'
         } finally {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
@@ -476,8 +471,7 @@ try {
                 'An unavailable owner lookup must not release the startup reservation'
         } finally {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_COMMAND_PATH, `
-                Env:\DSH_TEST_STARTUP_OWNER_QUERY_SCRIPT_PATH -ErrorAction SilentlyContinue
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
