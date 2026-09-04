@@ -186,7 +186,11 @@ function Get-StartupOwnerStatus {
         return 'STALE'
     }
 
-    if (Test-DshCommandLineArgument -CommandLine ([string]$process.CommandLine) `
+    $actualCommandLine = [string]$process.CommandLine
+    if ([string]::IsNullOrWhiteSpace($actualCommandLine)) {
+        return 'UNKNOWN'
+    }
+    if (Test-DshCommandLineArgument -CommandLine $actualCommandLine `
             -ExpectedPath $normalizedScriptPath) {
         return 'ALIVE'
     }

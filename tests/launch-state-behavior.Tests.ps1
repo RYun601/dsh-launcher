@@ -133,9 +133,14 @@ function Get-CimInstance {
     $launchRoot = [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT
     $identityPath = Join-Path (Join-Path $launchRoot 'dsh-startup.lock') 'identity.json'
     $identity = Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json
+    $recordMode = [string]$env:DSH_TEST_STARTUP_OWNER_QUERY_RECORD_MODE
+    $executablePath = if ($recordMode -eq 'missing-executable-path') { '' } else { [string]$identity.CommandPath }
+    $commandLine = if ($recordMode -eq 'missing-command-line') { '' } else {
+        'powershell.exe -File "' + [string]$identity.ScriptPath + '"'
+    }
     return [pscustomobject]@{
-        ExecutablePath = [string]$identity.CommandPath
-        CommandLine = 'powershell.exe -File "' + [string]$identity.ScriptPath + '"'
+        ExecutablePath = $executablePath
+        CommandLine = $commandLine
     }
 }
 '@
@@ -287,6 +292,59 @@ try {
         } finally {
             Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
                 Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT -ErrorAction SilentlyContinue
+            if ($runner -and -not $runner.HasExited) {
+                Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
+                $runner.WaitForExit()
+            }
+        }
+    }
+
+    Invoke-Test 'status retains a startup lock when owner command line is temporarily unavailable' {
+        $launchRoot = Join-Path $testRoot 'starting-owner-command-line-unavailable'
+        $startupToken = '15151515151515151515151515151515'
+        $fixture = New-ClassifierFixture -Name 'owner-command-line-unavailable' -ClassificationState 'STOPPED' `
+            -ServicePid 0 -StubStartupOwnerQuery
+        $runnerScript = Join-Path $testRoot 'owner-command-line-unavailable-background-run.ps1'
+        $runner = Start-TestScriptProcess -ScriptPath $runnerScript
+        $lockDirectory = Join-Path $launchRoot 'dsh-startup.lock'
+        try {
+            $lock = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'AcquireStartupLock', '-LaunchRoot', $launchRoot,
+                '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-CommandPath', $powerShellPath, '-ScriptPath', $runnerScript
+            )
+            Assert-Equal 0 $lock.ExitCode "The live startup lock should be acquired. Output:`n$($lock.Output)"
+            $write = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                '-Action', 'WriteStartupState', '-LaunchRoot', $launchRoot,
+                '-State', 'STARTING', '-OwnerPid', $runner.Id, '-StartupToken', $startupToken,
+                '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+            )
+            Assert-Equal 0 $write.ExitCode "The STARTING state should be written. Output:`n$($write.Output)"
+
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_FAILURES = '0'
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT = $launchRoot
+            $env:DSH_TEST_STARTUP_OWNER_QUERY_RECORD_MODE = 'missing-command-line'
+            try {
+                $status = Invoke-StateHelper -HelperPath $fixture.HelperPath -Arguments @(
+                    '-Action', 'GetStatus', '-LaunchRoot', $launchRoot, '-Port', 31986
+                )
+            } finally {
+                Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT, `
+                    Env:\DSH_TEST_STARTUP_OWNER_QUERY_RECORD_MODE -ErrorAction SilentlyContinue
+            }
+
+            Assert-Equal 0 $status.ExitCode "Status lookup should succeed. Output:`n$($status.Output)"
+            Assert-Match $status.Output "STARTING - PID $($runner.Id)" `
+                'A missing owner command line must not report a valid startup as STOPPED'
+            Assert-True (Test-Path -LiteralPath $lockDirectory) `
+                'A missing owner command line must not delete the authoritative startup lock'
+            $state = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.json') -Raw | ConvertFrom-Json
+            Assert-Equal 'STARTING' $state.State 'Status must preserve STARTING while owner command line is unavailable'
+        } finally {
+            Remove-Item Env:\DSH_TEST_STARTUP_OWNER_QUERY_FAILURES, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_LAUNCH_ROOT, `
+                Env:\DSH_TEST_STARTUP_OWNER_QUERY_RECORD_MODE -ErrorAction SilentlyContinue
             if ($runner -and -not $runner.HasExited) {
                 Stop-Process -Id $runner.Id -Force -ErrorAction SilentlyContinue
                 $runner.WaitForExit()
