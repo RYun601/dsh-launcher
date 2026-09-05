@@ -6,6 +6,7 @@ $ProgressPreference = 'SilentlyContinue'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $repoRoot 'release-files.txt'
 $releaseWorkflowPath = Join-Path $repoRoot '.github\workflows\release.yml'
+$checkWorkflowPath = Join-Path $repoRoot '.github\workflows\check.yml'
 $testRoot = Join-Path $env:TEMP ('dsh-release-tests-' + [guid]::NewGuid().ToString('N'))
 $packageRoot = if ($ArchivePath) { Join-Path $testRoot 'extracted\dsh-launcher' } else { Join-Path $testRoot 'dsh-launcher' }
 $fakeBin = Join-Path $testRoot 'fake-bin'
@@ -106,6 +107,7 @@ New-Item -ItemType Directory -Force -Path $fakeBin, $profileRoot | Out-Null
 try {
     if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'release-files.txt is missing' }
     $releaseWorkflow = Get-Content -LiteralPath $releaseWorkflowPath -Raw
+    $checkWorkflow = Get-Content -LiteralPath $checkWorkflowPath -Raw
     Assert-Match $releaseWorkflow 'github\.ref_name' 'Release workflow must inspect the pushed tag name'
     Assert-Match $releaseWorkflow '(?m)^\s+name:\s+\$\{\{\s*github\.ref_name\s*\}\}\s*$' `
         'Release workflow must set the GitHub Release title from the pushed tag'
@@ -120,6 +122,8 @@ try {
         'Release workflow must keep the extracted archive smoke test'
     Assert-True ($releaseWorkflow -notmatch '(?m)^\s+- name:\s+Run complete Windows behavior suite\s*$') `
         'Release workflow should leave the full Windows behavior suite to the branch checks'
+    Assert-True ($checkWorkflow -notmatch '(?m)^\s+- name:\s+Run complete Windows behavior suite\s*$') `
+        'Check workflow should leave the full Windows behavior suite to local Windows acceptance'
     $releaseFiles = @(Get-Content -LiteralPath $manifestPath | Where-Object { $_ -and -not $_.StartsWith('#') })
     if ($ArchivePath) {
         if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) { throw "Release archive is missing: $ArchivePath" }
