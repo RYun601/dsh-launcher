@@ -27,7 +27,7 @@ is also supported.
 dsh-launcher is a launcher for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness);
 dsh-launcher only requires Node.js. On the first `deepseek` run, it prepares and starts DeepSeek Harness through npm in `%USERPROFILE%\dsh-launch\runtime`.
 
-1. Install [Node.js](https://nodejs.org) LTS
+1. Install [Node.js](https://nodejs.org) LTS (requires `^22.19.0 || >=24.0.0`; Node 22 LTS or 24+ both work. The launcher checks this before install, start and upgrade and reports the current version and how to upgrade)
 
 > The first launch requires an internet connection. Node.js normally includes npm; if the environment check cannot find npm, reinstall Node.js LTS.
 
@@ -104,20 +104,23 @@ After completing the installation above (any option) and opening a **new** termi
 | --- | --- |
 | `deepseek` | Foreground mode (default): shows logs in a window; close the window or press Ctrl+C to stop |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | Background mode: returns immediately while the service keeps starting; browser opens automatically when ready |
-| `deepseek --status` | Show service state (`RUNNING (ready)` / `RUNNING (starting)` / `STARTING` / `FAILED` / `NOT RUNNING`); `STARTING` covers download/install and `FAILED` includes the log path |
-| `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart |
+| `deepseek --status` | Show service state (`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`); `STARTING` covers download/install and `FAILED` includes the log path |
+| `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart; a failed kill or wait timeout fails loudly with a nonzero exit code |
 | `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
 | `deepseek --version` | Show launcher version and local DeepSeek Harness version |
 | `deepseek --update` | Compare the local version with the latest on npm and show how to update |
-| `deepseek --upgrade` | One-click upgrade: stop service, clear old DSH npx workspaces, sync the global `dsh` command, prepare the latest runtime, restart in background |
+| `deepseek --upgrade` | One-click upgrade: resolve and validate the target version first; if the current runtime is healthy and already at least the target version, report that it is already latest and exit without stopping the service or running npm; otherwise stop the service, clear old DSH npx workspaces, sync the global `dsh` command, and restart in background; if the candidate fails because a plugin imports an export removed from DSH, it lists the incompatible plugins and asks whether to remove them, then retries the candidate after confirmation; declining or failing the repair falls back through current, previous, or legacy usable runtimes (only runtimes that pass readiness validation are used for rollback) |
 | `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
-| `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation) |
+| `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation — cancelling changes nothing; stops the service first, moves directories to a backup before deletion; PATH is removed only after every directory is safely backed up; the install dir is validated against its ownership marker, and a failed cleanup keeps the backup with its location) |
 | `deepseek --check` | Environment self-check (script path / npm / port) |
 | `deepseek --help` | Show help |
 
 - Normal startup prefers the prepared and validated local DSH version and does not contact npm when a usable runtime exists. Dependencies are prepared only for a first launch or repair without a usable runtime. Use `deepseek --update` to discover releases from npm and `deepseek --upgrade` to install and switch versions.
 - `deepseek --update` / `deepseek --upgrade` query the npm public registry's dist-tags directly (faster than `npm view`). To use a mirror or a private registry, set the `DSH_REGISTRY` environment variable (e.g. `https://registry.npmmirror.com`). It only affects remote release discovery, never local runtime startup.
-- `deepseek --upgrade` also syncs the global `dsh` command: upgrades it to the latest version when installed, or installs it when missing, so the `dsh` command stays in line with the launcher. A failure here only prints a warning and never blocks the launcher runtime upgrade.
+- `deepseek --upgrade` also syncs the global `dsh` command: upgrades it to the latest version when installed, or installs it when missing, so the `dsh` command stays in line with the launcher. A failure here only prints a warning and never blocks the launcher runtime upgrade. If the target version cannot be resolved or is invalid, the upgrade aborts before stopping anything and leaves the current install untouched.
+- If the candidate startup log confirms that a plugin imports an export removed from DSH, `deepseek --upgrade` lists the plugin names and asks whether to remove them from the `web` profile. After confirmation it runs the target version's `dsh plugin --profile web remove` command and retries the candidate; declining preserves the plugins and falls back to the old runtime.
+- Only one action is allowed per invocation (`--help`, `--status`, `--stop`, `-b`, ... are mutually exclusive); combining actions fails with an error. `--full` is only valid together with `--uninstall` and reaches the transactional full uninstaller; a number is valid only immediately after `--logs` as its single line count. Real exit codes from the PowerShell layer are propagated unchanged to the `deepseek` command.
+- Node.js `^22.19.0 || >=24.0.0` is required (same as upstream): install, start and upgrade share one version check and fail with the current version, the required range, and an upgrade hint before any runtime preparation happens.
 
 ## Other Ways to Start
 
@@ -150,6 +153,8 @@ After completing the installation above (any option) and opening a **new** termi
 - **Stuck on download / network errors**: switch to a mirror and retry: `npm config set registry https://registry.npmmirror.com`
 - **`deepseek --status` shows `STARTING`**: DSH is downloading or starting. Use `deepseek --logs 50` to inspect progress; another `deepseek -b` will not submit a duplicate startup job.
 - **`deepseek --status` shows `FAILED`**: DSH exited before it listened on the port. Run `deepseek --logs 50` for the error, then retry with `deepseek -b`.
+- **`deepseek --status` shows `UNHEALTHY`**: a DSH process listens on port 3080 but HTTP is not answering (it may have hung). Run `deepseek --stop` and start again.
+- **`deepseek --status` shows `FOREIGN_PORT`**: port 3080 is owned by a process that is not DeepSeek Harness. Free the port before starting; neither the launcher nor the stop logic will kill an unknown process.
 - **Port 3080 is already in use (EADDRINUSE)**: an instance is already running — check with `deepseek --status`, or run `deepseek --stop` first
 - **Service stops when the foreground window closes**: by design (the process lives in the console window); use `deepseek -b` for a persistent service
 - **Migrate existing DSH settings (including API Key)**: copy the whole `%USERPROFILE%\.dsh` folder to `C:\Users\<username>\.dsh` on the new machine (contains sensitive credentials — do not share publicly)

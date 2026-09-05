@@ -5,3 +5,7 @@ dsh-background.log.old
 dist/
 Microsoft/
 docs/
+# 仅保留项目评估文档，其他本地规划文档继续忽略。
+!docs/
+docs/*
+!docs/dsh-launcher-comprehensive-assessment-2026-08-25.md

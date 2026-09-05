@@ -3,10 +3,13 @@ param([string]$TestFilter = $env:DSH_TEST_FILTER)
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$env:DSH_TEST_MODE = '1'
 $startScript = Join-Path $repoRoot 'start-background.ps1'
+$foregroundScript = Join-Path $repoRoot 'start-foreground.ps1'
 $startCommand = Join-Path $repoRoot 'start-background.cmd'
 $harness = Join-Path $PSScriptRoot 'start-background-harness.ps1'
 $testRoot = Join-Path $env:TEMP ('dsh-launcher-tests-' + [guid]::NewGuid().ToString('N'))
+$httpFixtureScript = Join-Path $testRoot 'startup-http-fixture.ps1'
 $script:Passed = 0
 
 function Assert-True {
@@ -82,6 +85,42 @@ function Get-PhaseText {
     return (-join @($CodeUnits | ForEach-Object { [char]$_ }))
 }
 
+function Get-FreeTcpPort {
+    $reservation = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    try {
+        $reservation.Start()
+        return ([Net.IPEndPoint]$reservation.LocalEndpoint).Port
+    } finally {
+        $reservation.Stop()
+    }
+}
+
+function Start-TestHttpFixture {
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell.exe'
+    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $httpFixtureScript + '" -Port ' + $Port
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::Start($startInfo)
+    for ($attempt = 0; $attempt -lt 50; $attempt++) {
+        try {
+            $probe = [Net.Sockets.TcpClient]::new()
+            $pending = $probe.BeginConnect('127.0.0.1', $Port, $null, $null)
+            if ($pending.AsyncWaitHandle.WaitOne(100)) {
+                $probe.EndConnect($pending)
+                $probe.Close()
+                return $process
+            }
+            $probe.Close()
+        } catch { }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $process.HasExited) { $process.Kill() }
+    throw "Startup HTTP fixture on port $Port did not start"
+}
+
 $script:PhasePrefix = Get-PhaseText @(0x542F, 0x52A8, 0x9636, 0x6BB5, 0xFF1A)                       # 启动阶段：
 $script:HeartbeatPrefix = Get-PhaseText @(0x542F, 0x52A8, 0x4ECD, 0x5728, 0x8FDB, 0x884C, 0xFF1A)  # 启动仍在进行：
 $script:OldCounterText = Get-PhaseText @(0x4ECD, 0x5728, 0x542F, 0x52A8, 0xFF0C, 0x5DF2, 0x7B49, 0x5F85)  # 仍在启动，已等待
@@ -94,7 +133,7 @@ $script:PhaseWeb = Get-PhaseText @(0x6B63, 0x5728, 0x542F, 0x52A8, 0x20, 0x57, 0
 
 function Invoke-StartScenario {
     param(
-        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'Staged')]
+        [ValidateSet('Immediate', 'Ready', 'Failed', 'Duplicate', 'DuplicateReady', 'DuplicateFailed', 'OccupiedDuplicate', 'OccupiedForeign', 'OccupiedReady', 'OccupiedUnhealthy', 'Staged')]
         [string]$Scenario,
         [string]$ScenarioName = $Scenario,
         [ValidateRange(1, 65535)]
@@ -103,22 +142,39 @@ function Invoke-StartScenario {
         [int]$HeartbeatSeconds = 30
     )
 
-    $scenarioRoot = Join-Path $testRoot $ScenarioName
+    $needsHttpFixture = $Scenario -in @('Ready', 'DuplicateReady', 'OccupiedReady', 'Staged')
+    if ($needsHttpFixture -and $Port -eq 3080) {
+        $Port = Get-FreeTcpPort
+    }
+    $effectiveScenarioName = if ($ScenarioName -eq $Scenario) {
+        $ScenarioName + '-' + [guid]::NewGuid().ToString('N')
+    } else {
+        $ScenarioName
+    }
+    $scenarioRoot = Join-Path $testRoot $effectiveScenarioName
     $profilePath = Join-Path $scenarioRoot 'profile'
     $processLogPath = Join-Path $scenarioRoot 'processes.log'
     New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
     [IO.File]::WriteAllText($processLogPath, '', [Text.Encoding]::UTF8)
 
+    $fixtureProcess = if ($needsHttpFixture) { Start-TestHttpFixture -Port $Port } else { $null }
     $timer = [Diagnostics.Stopwatch]::StartNew()
-    $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harness `
-        -Scenario $Scenario `
-        -ScriptPath $startScript `
-        -ProfilePath $profilePath `
-        -ProcessLogPath $processLogPath `
-        -Port $Port `
-        -HeartbeatSeconds $HeartbeatSeconds 2>&1
-    $exitCode = $LASTEXITCODE
-    $timer.Stop()
+    try {
+        $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $harness `
+            -Scenario $Scenario `
+            -ScriptPath $startScript `
+            -ProfilePath $profilePath `
+            -ProcessLogPath $processLogPath `
+            -Port $Port `
+            -HeartbeatSeconds $HeartbeatSeconds 2>&1
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $timer.Stop()
+        if ($fixtureProcess -and -not $fixtureProcess.HasExited) {
+            Stop-Process -Id $fixtureProcess.Id -Force -ErrorAction SilentlyContinue
+            $fixtureProcess.WaitForExit()
+        }
+    }
 
     return [pscustomobject]@{
         ExitCode   = $exitCode
@@ -131,6 +187,7 @@ function Invoke-StartScenario {
         StatePath  = Join-Path $profilePath 'dsh-launch\dsh-startup.json'
         LockPath   = Join-Path $profilePath 'dsh-launch\dsh-startup.lock'
         LockTokenPath = Join-Path $profilePath 'dsh-launch\dsh-startup.lock\token.txt'
+        Port        = $Port
     }
 }
 
@@ -258,6 +315,7 @@ function Invoke-ReservedRealBackgroundRunner {
     $launchRoot = Join-Path $profilePath 'dsh-launch'
     $fakeBin = Join-Path $scenarioRoot 'fake-bin'
     $startupToken = [guid]::NewGuid().ToString('N')
+    $port = Get-FreeTcpPort
     $gatePath = Join-Path $launchRoot ("startup-$startupToken.gate")
     New-Item -ItemType Directory -Force -Path $profilePath, $fakeBin | Out-Null
 
@@ -283,23 +341,28 @@ function Invoke-ReservedRealBackgroundRunner {
     )
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
-        "@echo off`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_BLANK echo.`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
+        "@echo off`r`necho v22.20.0`r`necho REAL_NODE_ARGS:%*`r`nif defined DSH_TEST_NODE_BLANK echo.`r`nif defined DSH_TEST_NODE_STAGES echo Preparing DeepSeek Harness runtime`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Installing 21 required DSH peer dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Validating DSH runtime dependencies...`r`nif defined DSH_TEST_NODE_STAGES powershell.exe -NoProfile -Command `"Start-Sleep -Milliseconds 500`"`r`nif defined DSH_TEST_NODE_STAGES echo Starting DeepSeek Harness web service...`r`nif defined DSH_TEST_NODE_STDERR >&2 echo BENIGN_NODE_STDERR`r`nif defined DSH_TEST_NODE_DELAY powershell.exe -NoProfile -Command `"Start-Sleep -Seconds %DSH_TEST_NODE_DELAY%`"`r`nexit /b 0`r`n",
         [Text.Encoding]::ASCII
     )
 
+    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $runnerScript = Join-Path $repoRoot 'background-run.ps1'
+    $currentTestScript = [IO.Path]::GetFullPath($MyInvocation.ScriptName)
     $reservation = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'dsh-launch-state.ps1') `
-        -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $PID -StartupToken $startupToken 2>&1
+        -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $PID -StartupToken $startupToken `
+        -CommandPath $systemPowerShell -ScriptPath $currentTestScript 2>&1
     Assert-Equal 0 $LASTEXITCODE "The test coordinator should reserve the startup lock. Output:`n$($reservation -join [Environment]::NewLine)"
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
-    $systemPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $runnerScript = Join-Path $repoRoot 'background-run.ps1'
     $runnerArguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', "`"$runnerScript`"",
         '-Version', '0.1.0-rc.8',
         '-LaunchRoot', "`"$launchRoot`"",
         '-StartupToken', $startupToken,
+        '-RuntimeRoot', "`"$runtimeRoot`"",
+        '-Entrypoint', "`"$dshEntrypoint`"",
+        '-Port', [string]$port,
         '-CoordinatorGate', "`"$gatePath`"",
         '-TimeoutSeconds', '10'
     )
@@ -328,7 +391,8 @@ function Invoke-ReservedRealBackgroundRunner {
     $process = [Diagnostics.Process]::Start($startInfo)
     $transfer = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repoRoot 'dsh-launch-state.ps1') `
         -Action AcquireStartupLock -LaunchRoot $launchRoot -OwnerPid $process.Id `
-        -StartupToken $startupToken -TransferOwnership 2>&1
+        -StartupToken $startupToken -CommandPath $systemPowerShell -ScriptPath $runnerScript `
+        -TransferOwnership 2>&1
     Assert-Equal 0 $LASTEXITCODE "The coordinator should transfer ownership to the real runner. Output:`n$($transfer -join [Environment]::NewLine)"
     [IO.File]::WriteAllText($gatePath, 'GO', [Text.Encoding]::ASCII)
 
@@ -351,6 +415,7 @@ function Invoke-ReservedRealBackgroundRunner {
     Assert-True $runnerStarted 'The real background runner should record STARTING before the fake npx command exits'
     $stateOwnerDuringRun = [string]$state.Pid
     $lockOwnerDuringRun = (Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock\pid.txt') -Raw).Trim()
+    $lockIdentityDuringRun = Get-Content -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock\identity.json') -Raw | ConvertFrom-Json
     $startupMessages = [System.Collections.Generic.List[string]]::new()
     if ($state.Message) { $startupMessages.Add([string]$state.Message) }
     $monitorCommandLine = ''
@@ -396,6 +461,12 @@ function Invoke-ReservedRealBackgroundRunner {
         StateOwnerDuringRun = $stateOwnerDuringRun
         MonitorCommandLine = $monitorCommandLine
         RunnerPid = $process.Id
+        StartupToken = $startupToken
+        RuntimeRoot = $runtimeRoot
+        Entrypoint = $dshEntrypoint
+        Port = $port
+        StateDuringRun = $state
+        LockIdentityDuringRun = $lockIdentityDuringRun
         StartupMessages = @($startupMessages)
         LockPath  = Join-Path $launchRoot 'dsh-startup.lock'
         Log       = Read-TestLog -Path $logPath
@@ -498,9 +569,94 @@ function Invoke-AlternateForegroundCommand {
     }
 }
 
+function Invoke-ForegroundForeignScenario {
+    $scenarioRoot = Join-Path $testRoot 'foreground-foreign'
+    $profilePath = Join-Path $scenarioRoot 'profile'
+    $fakeBin = Join-Path $scenarioRoot 'fake-bin'
+    $eventsPath = Join-Path $scenarioRoot 'events.log'
+    $harnessPath = Join-Path $scenarioRoot 'foreground-harness.ps1'
+    New-Item -ItemType Directory -Force -Path $profilePath, $fakeBin | Out-Null
+    [IO.File]::WriteAllText($eventsPath, '', [Text.Encoding]::ASCII)
+    [IO.File]::WriteAllText(
+        (Join-Path $fakeBin 'node.cmd'),
+        "@echo off`r`necho NODE %*>>`"$eventsPath`"`r`nexit /b 0`r`n",
+        [Text.Encoding]::ASCII
+    )
+
+    $harness = @'
+param([string]$ForegroundScript, [string]$LaunchRoot, [string]$EventsPath)
+$ErrorActionPreference = 'Stop'
+$env:DSH_TEST_MODE = '1'
+function global:Get-NetTCPConnection {
+    param([int]$LocalPort, [string]$State, [object]$ErrorAction)
+    return [pscustomobject]@{ LocalAddress = '127.0.0.1'; LocalPort = $LocalPort; OwningProcess = 4242 }
+}
+function global:Get-CimInstance {
+    param([string]$ClassName, [string]$Filter, [object]$ErrorAction)
+    return [pscustomobject]@{
+        Name = 'other-server.exe'
+        CommandLine = 'C:\apps\other-server.exe --serve'
+        ExecutablePath = 'C:\apps\other-server.exe'
+    }
+}
+function global:Start-Process {
+    param([Parameter(Position = 0)][string]$FilePath, [object[]]$ArgumentList)
+    [IO.File]::AppendAllText($EventsPath, "START $FilePath $($ArgumentList -join ' ')`r`n", [Text.Encoding]::ASCII)
+}
+& $ForegroundScript -LaunchRoot $LaunchRoot -Version '0.1.0-rc.8' -Port 43123
+exit $LASTEXITCODE
+'@
+    [IO.File]::WriteAllText($harnessPath, $harness, [Text.UTF8Encoding]::new($false))
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'powershell.exe'
+    $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $harnessPath +
+        '" -ForegroundScript "' + $foregroundScript + '" -LaunchRoot "' +
+        (Join-Path $profilePath 'dsh-launch') + '" -EventsPath "' + $eventsPath + '"'
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables['USERPROFILE'] = $profilePath
+    $startInfo.EnvironmentVariables['DSH_TEST_MODE'] = '1'
+    $startInfo.EnvironmentVariables['PATH'] = "$fakeBin;$env:PATH"
+    $process = [Diagnostics.Process]::Start($startInfo)
+    Assert-True ($process.WaitForExit(5000)) 'Foreground foreign-port scenario did not return promptly'
+    return [pscustomobject]@{
+        ExitCode = $process.ExitCode
+        Output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+        Events = [IO.File]::ReadAllText($eventsPath)
+    }
+}
+
 New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+$httpFixtureSource = @'
+param([int]$Port)
+$bodyBytes = [Text.Encoding]::UTF8.GetBytes('<div id="root"></div>')
+$headerBytes = [Text.Encoding]::ASCII.GetBytes(
+    "HTTP/1.1 200 OK`r`nContent-Type: text/html; charset=utf-8`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+)
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+$listener.Start()
 try {
-    Invoke-Test 'closed-port startup skips Get-NetTCPConnection' {
+    while ($true) {
+        $client = $listener.AcceptTcpClient()
+        try {
+            $stream = $client.GetStream()
+            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::ASCII, $false, 1024, $true)
+            while ($true) {
+                $line = $reader.ReadLine()
+                if ($null -eq $line -or $line -eq '') { break }
+            }
+            $stream.Write($headerBytes, 0, $headerBytes.Length)
+            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            $stream.Flush()
+        } catch { } finally { $client.Close() }
+    }
+} finally { $listener.Stop() }
+'@
+[IO.File]::WriteAllText($httpFixtureScript, $httpFixtureSource, [Text.UTF8Encoding]::new($false))
+try {
+    Invoke-Test 'closed-port startup is classified before runner submission' {
         $reservation = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $reservation.Start()
         $closedPort = ([Net.IPEndPoint]$reservation.LocalEndpoint).Port
@@ -508,7 +664,8 @@ try {
 
         $closed = Invoke-StartScenario -Scenario Immediate -ScenarioName 'closed-port' -Port $closedPort
         Assert-Equal 0 $closed.ExitCode "Closed-port startup should be submitted. Output:`n$($closed.Output)"
-        Assert-NotMatch $closed.ProcessLog 'GET_NET_TCP_CONNECTION' 'Closed-port startup must avoid the networking cmdlet'
+        Assert-Match $closed.ProcessLog "GET_NET_TCP_CONNECTION`t$closedPort" `
+            'Closed-port startup must use the shared service classifier before submission'
     }
 
     Invoke-Test 'occupied-port startup resolves its owner after TCP connects' {
@@ -523,6 +680,73 @@ try {
 
         Assert-Equal 0 $occupied.ExitCode "Occupied-port startup should report the existing listener. Output:`n$($occupied.Output)"
         Assert-Match $occupied.ProcessLog "GET_NET_TCP_CONNECTION`t$occupiedPort" 'Occupied port must resolve its owner for diagnostics'
+    }
+
+    Invoke-Test 'foreign port occupant is reported FOREIGN_PORT without opening a browser' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $foreignPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $listener.Stop()
+        $foreign = Invoke-StartScenario -Scenario OccupiedForeign -ScenarioName 'foreign-occupied' -Port $foreignPort
+
+        Assert-Equal 1 $foreign.ExitCode "A foreign port occupant must refuse reuse. Output:`n$($foreign.Output)"
+        Assert-Match $foreign.Output 'FOREIGN_PORT' 'The refusal must name the FOREIGN_PORT state'
+        Assert-NotMatch $foreign.ProcessLog '(?m)^http://127\.0\.0\.1:' 'A foreign occupant must not open a browser'
+        Assert-NotMatch $foreign.ProcessLog 'background-run\.(?:cmd|ps1)' 'A foreign occupant must not submit another runner'
+    }
+
+    Invoke-Test 'foreground foreign port exits 1 without browser or runtime launch' {
+        $foreign = Invoke-ForegroundForeignScenario
+        Assert-Equal 1 $foreign.ExitCode "Foreground must reject a foreign listener. Output:`n$($foreign.Output)"
+        Assert-Match $foreign.Output 'FOREIGN_PORT' 'Foreground refusal must name the shared classifier state'
+        Assert-NotMatch $foreign.Events 'START .*open-when-ready\.ps1|OPEN http://|NODE ' `
+            'Foreground rejection must not start a monitor, browser, or run-dsh runtime'
+    }
+
+    Invoke-Test 'production lifecycle entrypoints reject isolated ports unless explicit test mode is enabled' {
+        $profilePath = Join-Path $testRoot 'production-port-guard-profile'
+        $isolatedPort = Get-FreeTcpPort
+        New-Item -ItemType Directory -Force -Path $profilePath | Out-Null
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = 'powershell.exe'
+        $startInfo.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $foregroundScript + '" -LaunchRoot "' +
+            (Join-Path $profilePath 'dsh-launch') + '" -Version 0.1.0-rc.8 -Port ' + $isolatedPort
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables['USERPROFILE'] = $profilePath
+        $startInfo.EnvironmentVariables.Remove('DSH_TEST_MODE')
+        $process = [Diagnostics.Process]::Start($startInfo)
+        Assert-True $process.WaitForExit(5000) 'Production port guard should fail before any lifecycle work starts'
+        $output = $process.StandardOutput.ReadToEnd() + $process.StandardError.ReadToEnd()
+        Assert-Equal 1 $process.ExitCode 'Production lifecycle scripts must reject non-3080 ports'
+        Assert-Match $output 'only supports port 3080' 'The port guard must give an explicit production-only diagnostic'
+    }
+
+    Invoke-Test 'DSH-identified healthy occupant is reused and the browser is opened once' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $dshPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $listener.Stop()
+        $existing = Invoke-StartScenario -Scenario OccupiedReady -ScenarioName 'dsh-occupied-ready' -Port $dshPort
+
+        Assert-Equal 0 $existing.ExitCode "A healthy DSH-identified occupant should be reused. Output:`n$($existing.Output)"
+        Assert-Match $existing.Output '\[REUSE\]' 'Reuse should explain that no duplicate start is needed'
+        Assert-Match $existing.ProcessLog '(?m)^http://127\.0\.0\.1:' 'Reuse should open the browser for the existing service'
+        Assert-NotMatch $existing.ProcessLog 'background-run\.(?:cmd|ps1)' 'Reuse must not submit another runner'
+    }
+
+    Invoke-Test 'DSH-identified occupant with dead HTTP is reported UNHEALTHY and not reused' {
+        $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        $deadPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+        $listener.Stop()
+        $unhealthy = Invoke-StartScenario -Scenario OccupiedUnhealthy -ScenarioName 'dsh-occupied-unhealthy' -Port $deadPort
+
+        Assert-Equal 1 $unhealthy.ExitCode "An unhealthy DSH occupant must not be reported as success. Output:`n$($unhealthy.Output)"
+        Assert-Match $unhealthy.Output 'UNHEALTHY' 'The failure must name the UNHEALTHY state'
+        Assert-NotMatch $unhealthy.ProcessLog '(?m)^http://127\.0\.0\.1:' 'An unhealthy occupant must not open a browser'
+        Assert-NotMatch $unhealthy.ProcessLog 'background-run\.(?:cmd|ps1)' 'An unhealthy occupant must not submit another runner'
     }
 
     Invoke-Test 'a live startup lock owns browser opening when its port is already listening' {
@@ -556,6 +780,18 @@ try {
         Assert-True (Test-Path -LiteralPath $result.LockTokenPath) 'The coordinator lock must record its startup token'
         $lockToken = (Get-Content -LiteralPath $result.LockTokenPath -Raw).Trim()
         Assert-Equal $tokenMatch.Groups[1].Value $lockToken 'The child environment and coordinator lock must identify the same startup task'
+        $state = Get-Content -LiteralPath $result.StatePath -Raw | ConvertFrom-Json
+        $expectedRuntimeRoot = Join-Path (Split-Path $result.StatePath -Parent) 'runtime'
+        $expectedEntrypoint = Join-Path $expectedRuntimeRoot 'node_modules\@deepseek-ai\dsh\lib\bin.js'
+        Assert-Equal $tokenMatch.Groups[1].Value ([string]$state.StartupToken) 'Coordinator state must retain the runner startup token'
+        Assert-Equal $expectedRuntimeRoot ([string]$state.RuntimeRoot) 'Coordinator state must retain the selected runtime root'
+        Assert-Equal $expectedEntrypoint ([string]$state.Entrypoint) 'Coordinator state must retain the selected entrypoint'
+        Assert-Match $result.ProcessLog ([regex]::Escape('-StartupToken ' + $tokenMatch.Groups[1].Value)) `
+            'Coordinator must pass the token explicitly to the runner'
+        Assert-Match $result.ProcessLog ([regex]::Escape('-RuntimeRoot "' + $expectedRuntimeRoot + '"')) `
+            'Coordinator must pass the selected runtime root explicitly to the runner'
+        Assert-Match $result.ProcessLog ([regex]::Escape('-Entrypoint "' + $expectedEntrypoint + '"')) `
+            'Coordinator must pass the expected entrypoint explicitly to the runner'
         Assert-Match $result.ProcessLog 'LOCK_PRESENT=True' 'The coordinator must initialize the lock before the runner can execute'
     }
 
@@ -586,7 +822,22 @@ try {
         Assert-Equal ([string]$result.RunnerPid) $result.StateOwnerDuringRun 'STARTING state must identify the runner'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape("-ParentPid $($result.RunnerPid)")) 'The readiness monitor must follow the runner process'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape("-OwnerPid $($result.RunnerPid)")) 'The readiness monitor must write RUNNING with the runner PID'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape("-StartupToken $($result.StartupToken)")) 'The monitor must receive the runner startup token'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-RuntimeRoot "' + $result.RuntimeRoot + '"')) 'The monitor must receive the selected runtime root'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Entrypoint "' + $result.Entrypoint + '"')) 'The monitor must receive the exact entrypoint'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Port ' + $result.Port)) 'The monitor must classify the isolated test service port'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-StableMilliseconds 5000')) 'The monitor must require a stable identity window'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-PollIntervalMilliseconds 200')) 'The runner must use the 200 ms readiness interval'
+        Assert-Equal $result.StartupToken ([string]$result.StateDuringRun.StartupToken) 'Runner state must retain the coordinator token'
+        Assert-Equal $result.RuntimeRoot ([string]$result.StateDuringRun.RuntimeRoot) 'Runner state must retain the selected runtime root'
+        Assert-Equal $result.Entrypoint ([string]$result.StateDuringRun.Entrypoint) 'Runner state must retain the exact entrypoint'
+        Assert-Equal $result.RunnerPid ([int]$result.StateDuringRun.RunnerPid) 'Runner state must identify the real runner PID'
+        Assert-Equal $result.RunnerPid ([int]$result.LockIdentityDuringRun.OwnerPid) 'Transferred lock must identify the real runner PID'
+        Assert-Equal $result.StartupToken ([string]$result.LockIdentityDuringRun.Token) 'Transferred lock must retain the startup token'
+        Assert-Equal ([IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'))) `
+            ([string]$result.LockIdentityDuringRun.CommandPath) 'Transferred lock must retain the runner command path'
+        Assert-Equal ([IO.Path]::GetFullPath((Join-Path $repoRoot 'background-run.ps1'))) `
+            ([string]$result.LockIdentityDuringRun.ScriptPath) 'Transferred lock must retain the runner script path'
         Assert-Match $result.Log '(?m)^Runner PID: \d+\s*$' 'The runner must log its identity before DSH work starts'
         Assert-Match $result.Log 'REAL_NODE_ARGS:.*@deepseek-ai\\dsh\\lib\\bin\.js web --no-open' 'The runner must leave browser ownership with the readiness monitor'
         Assert-Equal 1 ([regex]::Matches($result.Log, '--no-open').Count) 'The runner must pass --no-open exactly once'
@@ -628,6 +879,7 @@ try {
 
     Invoke-Test 'ten rapid PowerShell runner cycles all log and release their locks' {
         foreach ($attempt in 1..10) {
+            Write-Host "Runner stress cycle $attempt/10..."
             $result = Invoke-ReservedRealBackgroundRunner -ScenarioName "runner-stress-$attempt" -NodeDelaySeconds 0 -SuppressBrowserMonitor
             Assert-Equal 0 $result.ExitCode "Stress runner $attempt should exit successfully. Output:`n$($result.Output)"
             Assert-Match $result.Log '(?m)^Runner PID: \d+\s*$' "Stress runner $attempt must write its first log record"
@@ -656,17 +908,17 @@ try {
     Invoke-Test 'foreground launch uses the prepared DSH runtime' {
         $result = Invoke-DeepseekCommand -Argument ''
         Assert-Equal 0 $result.ExitCode 'The fake foreground DSH command should exit successfully'
-        Assert-Match $result.ProcessLog 'resolve-dsh-version\.ps1.*-PreferLocalRuntime' 'Foreground launch must reuse a prepared runtime without registry discovery'
-        Assert-Match $result.ProcessLog 'open-when-ready\.ps1.*-PollIntervalMilliseconds 200' 'Foreground launch must use the 200 ms readiness interval'
-        Assert-Match $result.ProcessLog 'run-dsh\.ps1.*-Version 0\.1\.0-rc\.8.*-DshArguments web.*-NoOpen' 'Foreground launch must leave browser ownership with the readiness monitor'
+        Assert-Match $result.ProcessLog 'start-foreground\.ps1' 'Foreground launch must delegate to the shared PowerShell coordinator'
+        Assert-NotMatch $result.ProcessLog 'resolve-dsh-version\.ps1|open-when-ready\.ps1|run-dsh\.ps1' `
+            'The CMD wrapper must not duplicate foreground startup logic'
     }
 
     Invoke-Test 'alternate foreground launcher uses the managed runtime instead of npx' {
         $result = Invoke-AlternateForegroundCommand
         Assert-Equal 0 $result.ExitCode "The alternate foreground command should exit successfully. Output:`n$($result.Output)"
-        Assert-Match $result.ProcessLog 'resolve-dsh-version\.ps1.*-PreferLocalRuntime' 'The alternate launcher must reuse a prepared runtime without registry discovery'
-        Assert-Match $result.ProcessLog 'open-when-ready\.ps1.*-PollIntervalMilliseconds 200' 'The alternate launcher must use the 200 ms readiness interval'
-        Assert-Match $result.ProcessLog 'run-dsh\.ps1.*-DshArguments web.*-NoOpen' 'The alternate launcher must leave browser ownership with the readiness monitor'
+        Assert-Match $result.ProcessLog 'start-foreground\.ps1' 'The alternate launcher must delegate to the shared PowerShell coordinator'
+        Assert-NotMatch $result.ProcessLog 'resolve-dsh-version\.ps1|open-when-ready\.ps1|run-dsh\.ps1' `
+            'The BAT wrapper must not duplicate foreground startup logic'
     }
 
     Invoke-Test 'unknown arguments are rejected with an error, never silently launched' {
@@ -685,17 +937,66 @@ try {
         Assert-NotMatch $result.Output 'uninstall\.ps1' 'must not dispatch to the uninstaller'
     }
 
-    Invoke-Test '--full with --uninstall still dispatches to the uninstaller' {
+    Invoke-Test '--full with --uninstall reaches the transactional full uninstaller' {
         $result = Invoke-DeepseekCommand -Argument '--uninstall --full'
         Assert-Equal 0 $result.ExitCode '--uninstall --full should dispatch normally'
-        Assert-Match $result.Output 'uninstall\.ps1' 'should invoke the full uninstaller'
+        Assert-Match $result.ProcessLog 'uninstall\.ps1.*(?:^|\s)-Full(?:\s|$)' 'Full uninstall must pass -Full to PowerShell'
+    }
+
+    Invoke-Test 'numeric CLI tokens are valid only as the single --logs count' {
+        foreach ($argument in @('20', '--status 20', '20 --logs', '--logs 20 30')) {
+            $result = Invoke-DeepseekCommand -Argument $argument
+            Assert-Equal 1 $result.ExitCode "Invalid numeric placement must fail: $argument"
+            Assert-Match $result.Output 'Unknown argument|Invalid.*logs|Usage:' 'The error must be actionable'
+            Assert-NotMatch $result.ProcessLog 'run-dsh\.ps1|dsh-launch-state\.ps1' 'Invalid input must not dispatch'
+        }
+    }
+
+    Invoke-Test '--logs accepts one numeric count' {
+        $result = Invoke-DeepseekCommand -Argument '--logs 50'
+        Assert-Equal 0 $result.ExitCode '--logs 50 should dispatch normally'
+        Assert-Match $result.ProcessLog '-Tail 50(?:\s|$)' 'The requested log count must reach PowerShell'
+    }
+
+    Invoke-Test 'conflicting actions are rejected without dispatching either' {
+        $result = Invoke-DeepseekCommand -Argument '--stop --status'
+        Assert-Equal 1 $result.ExitCode 'conflicting actions should exit with code 1'
+        Assert-Match $result.Output 'Conflicting actions' 'should name the conflict'
+        Assert-Match $result.Output 'Usage:' 'should print the help block'
+        Assert-NotMatch $result.ProcessLog 'stop-dsh\.ps1' 'must not dispatch the stop action'
+        Assert-NotMatch $result.ProcessLog 'dsh-launch-state\.ps1' 'must not dispatch the status action'
+    }
+
+    Invoke-Test 'every PowerShell-backed CLI action preserves its child exit code' {
+        $cases = @(
+            [pscustomobject]@{ Argument = '-b'; ExpectedLog = 'start-background\.ps1' },
+            [pscustomobject]@{ Argument = '--stop'; ExpectedLog = 'stop-dsh\.ps1' },
+            [pscustomobject]@{ Argument = '--status'; ExpectedLog = 'dsh-launch-state\.ps1' },
+            [pscustomobject]@{ Argument = '--logs 50'; ExpectedLog = '-Tail 50(?:\s|$)' },
+            [pscustomobject]@{ Argument = '--upgrade'; ExpectedLog = 'upgrade-dsh\.ps1' },
+            [pscustomobject]@{ Argument = '--update'; ExpectedLog = 'update-check\.ps1' },
+            [pscustomobject]@{ Argument = '--version'; ExpectedLog = 'dsh-version\.ps1' },
+            [pscustomobject]@{ Argument = '--uninstall'; ExpectedLog = 'uninstall\.ps1' },
+            [pscustomobject]@{ Argument = ''; ExpectedLog = 'start-foreground\.ps1' }
+        )
+
+        foreach ($case in $cases) {
+            $result = Invoke-DeepseekCommand -Argument $case.Argument -PowerShellExitCode 7
+            Assert-Equal 7 $result.ExitCode "The child exit code must propagate: $($case.Argument). Output: $($result.Output)"
+            Assert-Match $result.ProcessLog $case.ExpectedLog "The action must dispatch before returning its code: $($case.Argument)"
+        }
+    }
+
+    Invoke-Test 'internal --check succeeds after its checks complete' {
+        $result = Invoke-DeepseekCommand -Argument '--check' -PowerShellExitCode 7
+        Assert-Equal 0 $result.ExitCode '--check must not inherit a PowerShell exit code because it completes internally'
     }
 
     Invoke-Test 'shortcut wait mode leaves browser opening to the runner monitor' {
         $result = Invoke-StartScenario -Scenario Ready
         Assert-Equal 0 $result.ExitCode 'Wait mode should exit successfully after HTTP readiness'
-        Assert-Match $result.ProcessLog 'WEB_REQUEST' 'Wait mode must observe HTTP readiness before returning'
-        Assert-NotMatch $result.ProcessLog '(?m)^http://127\.0\.0\.1:3080\s*$' 'The wait coordinator must not issue a duplicate browser launch'
+        Assert-Match $result.ProcessLog 'GET_NET_TCP_CONNECTION' 'Wait mode must classify service identity before returning'
+        Assert-NotMatch $result.ProcessLog '(?m)^http://127\.0\.0\.1:\d+\s*$' 'The wait coordinator must not issue a duplicate browser launch'
         Assert-NotMatch $result.ProcessLog '-SuppressBrowserMonitor|SUPPRESS_MONITOR=1' 'Wait mode must leave the runner readiness monitor enabled'
     }
 
@@ -711,7 +1012,7 @@ try {
     Invoke-Test 'wait mode prints mapped startup phases and a phase-aware heartbeat' {
         $result = Invoke-StartScenario -Scenario Staged -ScenarioName 'staged-phases' -HeartbeatSeconds 1
         Assert-Equal 0 $result.ExitCode "Staged startup should exit after HTTP readiness. Output:`n$($result.Output)"
-        Assert-Match $result.ProcessLog 'WEB_REQUEST' 'The wait loop must poll HTTP readiness before the staged service becomes ready'
+        Assert-Match $result.ProcessLog 'GET_NET_TCP_CONNECTION' 'The wait loop must classify service identity before the staged service becomes ready'
         $stagedOutput = [IO.File]::ReadAllText($result.StagedOutputPath)
         foreach ($phase in @($script:PhaseDownload, $script:PhasePeers, $script:PhaseValidate, $script:PhaseWeb)) {
             $phaseLinePattern = [regex]::Escape($script:PhasePrefix + $phase)
@@ -732,9 +1033,9 @@ try {
     Invoke-Test 'wait mode attaches to an existing startup until it becomes ready' {
         $result = Invoke-StartScenario -Scenario DuplicateReady
         Assert-Equal 0 $result.ExitCode 'A synchronous duplicate should succeed only after observing readiness'
-        Assert-Match $result.ProcessLog 'WEB_REQUEST' 'Synchronous duplicate startup must poll the existing service instead of returning immediately'
+        Assert-Match $result.ProcessLog 'GET_NET_TCP_CONNECTION' 'Synchronous duplicate startup must classify the existing service instead of returning immediately'
         Assert-NotMatch $result.ProcessLog 'background-run\.(?:cmd|ps1)' 'Attaching to an existing startup must not submit another runner'
-        Assert-NotMatch $result.ProcessLog '(?m)^http://127\.0\.0\.1:3080\s*$' 'The attached waiter must leave browser ownership with the original startup'
+        Assert-NotMatch $result.ProcessLog '(?m)^http://127\.0\.0\.1:\d+\s*$' 'The attached waiter must leave browser ownership with the original startup'
     }
 
     Invoke-Test 'wait mode propagates failure from an existing startup' {

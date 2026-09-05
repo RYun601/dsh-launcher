@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 title DeepSeek Harness
 cd /d "%USERPROFILE%"
 
@@ -7,18 +8,23 @@ set "ARGS=%*"
 rem The cmd built-in help switch (slash followed by a question mark) is not a
 rem plain token for echo or for: echo prints ECHO help and for drops the
 rem token, so that help alias would silently fall through to the foreground
-rem launch.  Fold it into --help before validation and dispatch.
-set "ARGS=%ARGS:/?=--help%"
+rem launch.  Fold it into --help before validation and dispatch.  The fold
+rem must run only when arguments exist and must use delayed expansion: a
+rem plain %-substitution against an undefined variable injects leftover
+rem pattern text into ARGS and derails validation and dispatch.
+if defined ARGS set "ARGS=!ARGS:/?=--help!"
 
-rem Validate every token before dispatching.  The findstr checks below use
-rem substring matching, so unknown options could otherwise trigger a mode
-rem accidentally.  Numeric tokens are accepted only for --logs [N]; --full
-rem is valid only together with --uninstall.
+rem Classify every token before dispatching.  Keep the canonical action and
+rem its modifiers separate so a number cannot silently become a foreground
+rem launch and --full cannot be lost on its way to the uninstaller.
+set "ACTION="
+set "FULL="
+set "LOG_COUNT="
 set "BADARG="
+set "CONFLICT="
 if defined ARGS (
     for %%a in (%ARGS%) do (
-        echo(%%a| findstr /i /r /c:"^--background$" /c:"^-b$" /c:"^--bg$" /c:"^--daemon$" /c:"^-d$" /c:"^--full$" /c:"^--stop$" /c:"^stop$" /c:"^--status$" /c:"^--logs$" /c:"^[0-9][0-9]*$" /c:"^--upgrade$" /c:"^--update$" /c:"^update$" /c:"^--version$" /c:"^--uninstall$" /c:"^uninstall$" /c:"^--help$" /c:"^-h$" /c:"^/\?$" /c:"^--check$" >nul 2>&1
-        if errorlevel 1 set "BADARG=%%a"
+        if not defined BADARG if not defined CONFLICT call :classify "%%~a"
     )
 )
 if defined BADARG (
@@ -27,10 +33,8 @@ if defined BADARG (
     call :help
     exit /b 1
 )
-echo %ARGS% | findstr /i /c:"--full" >nul 2>&1
-if not errorlevel 1 (
-    echo %ARGS% | findstr /i /c:"--uninstall" >nul 2>&1
-    if errorlevel 1 (
+if defined FULL (
+    if /i not "%ACTION%"=="uninstall" (
         echo [ERROR] --full is only valid together with --uninstall
         echo.
         call :help
@@ -38,116 +42,131 @@ if not errorlevel 1 (
     )
 )
 
-echo %ARGS% | findstr /i /c:"--background" /c:"-b" /c:"--bg" /c:"--daemon" /c:"-d" >nul 2>&1
-if not errorlevel 1 goto background
+if defined CONFLICT (
+    echo [ERROR] Conflicting actions: !CONFLICT!
+    echo Choose one action per invocation; see the list below.
+    echo.
+    call :help
+    exit /b 1
+)
 
-echo %ARGS% | findstr /i /c:"--full" >nul 2>&1
-if not errorlevel 1 goto uninstall-full
+if /i "%ACTION%"=="background" (
+    call :background
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="stop" (
+    call :stop
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="status" (
+    call :status
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="logs" (
+    call :logs
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="upgrade" (
+    call :upgrade
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="update" (
+    call :update
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="version" (
+    call :version
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="uninstall" (
+    call :uninstall
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="help" (
+    call :help
+    exit /b 0
+)
+if /i "%ACTION%"=="check" (
+    call :check
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
 
-echo %ARGS% | findstr /i /c:"--stop" /c:"stop" >nul 2>&1
-if not errorlevel 1 goto stop
-
-echo %ARGS% | findstr /i /c:"--status" >nul 2>&1
-if not errorlevel 1 goto status
-
-echo %ARGS% | findstr /i /c:"--logs" >nul 2>&1
-if not errorlevel 1 goto logs
-
-echo %ARGS% | findstr /i /c:"--upgrade" >nul 2>&1
-if not errorlevel 1 goto upgrade
-
-echo %ARGS% | findstr /i /c:"--update" /c:"update" >nul 2>&1
-if not errorlevel 1 goto update
-
-echo %ARGS% | findstr /i /c:"--version" >nul 2>&1
-if not errorlevel 1 goto version
-
-echo %ARGS% | findstr /i /c:"--uninstall" /c:"uninstall" >nul 2>&1
-if not errorlevel 1 goto uninstall
-
-echo %ARGS% | findstr /i /c:"--help" /c:"-h" /c:"/?" >nul 2>&1
-if not errorlevel 1 goto help
-
-echo %ARGS% | findstr /i /c:"--check" >nul 2>&1
-if not errorlevel 1 goto check
-
-goto foreground
+call :foreground
+set "DSH_RC=!ERRORLEVEL!"
+exit /b !DSH_RC!
 
 :foreground
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$c=Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue; if ($c) { Write-Host ('[INFO] Port 3080 is already in use (PID ' + $c.OwningProcess + ') - opening browser...'); Start-Process 'http://127.0.0.1:3080'; exit 2 }"
-if errorlevel 2 exit /b 0
-echo Starting DeepSeek Harness (foreground)...
-echo Browser will open automatically at http://127.0.0.1:3080
-echo Press Ctrl+C or close this window to stop.
-echo.
-for /f %%P in ('powershell -NoProfile -Command "(Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId"') do set "DSH_PPID=%%P"
-if defined DSH_PPID (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -ParentPid %DSH_PPID% -PollIntervalMilliseconds 200
-) else (
-    start "" /b powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-when-ready.ps1" -PollIntervalMilliseconds 200
-)
-for /f "delims=" %%v in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0resolve-dsh-version.ps1" -PreferLocalRuntime') do set "DSH_TARGET=%%v"
-if not defined DSH_TARGET set "DSH_TARGET=latest"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-dsh.ps1" -Version "%DSH_TARGET%" -DshArguments web -NoOpen
-echo.
-echo Service stopped (or failed to start).
-exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-foreground.ps1"
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :background
 echo Starting DeepSeek Harness (background)...
 echo This command returns immediately; the browser opens when ready.
 echo.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start-background.ps1" -TimeoutSeconds 900
-exit /b %ERRORLEVEL%
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :stop
 echo Stopping DeepSeek Harness...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop-dsh.ps1"
-exit /b 0
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :status
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-launch-state.ps1" -Action GetStatus
-exit /b %ERRORLEVEL%
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :logs
-for /f "tokens=2" %%n in ("%ARGS%") do set "LOGN=%%n"
-rem echo( + no space before the pipe keeps the echoed message free of the
-rem trailing space that echo would otherwise append; an anchored digit regex
-rem must not see that trailing space or `--logs N` always falls back to 20.
-echo(%LOGN%| findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
-if not errorlevel 1 (set "COUNT=%LOGN%") else (set "COUNT=20")
+set "COUNT=20"
+if defined LOG_COUNT set "COUNT=%LOG_COUNT%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'; if (Test-Path $log) { Get-Content $log -Tail %COUNT% -Encoding UTF8 } else { Write-Host ('No log yet: ' + $log) }"
-exit /b 0
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :upgrade
 echo Upgrading DeepSeek Harness (stop -> clear cache -> restart)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1"
-exit /b %ERRORLEVEL%
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :update
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-check.ps1"
-exit /b 0
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :version
 powershell -NoProfile -ExecutionPolicy Bypass -Command ". '%~dp0dsh-version.ps1'; $ver = if (Test-Path '%~dp0VERSION') { (Get-Content '%~dp0VERSION' -Raw).Trim() } else { 'unknown' }; $vers = @(); $cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'; if (Test-Path $cacheRoot) { Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $pj) { try { $vers += (Get-Content $pj -Raw | ConvertFrom-Json).version } catch {} } } }; $runtimePj = Join-Path $env:USERPROFILE 'dsh-launch\runtime\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $runtimePj) { try { $vers += (Get-Content $runtimePj -Raw | ConvertFrom-Json).version } catch {} }; $gpj = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $gpj) { try { $vers += (Get-Content $gpj -Raw | ConvertFrom-Json).version } catch {} }; $local = if ($vers.Count) { Get-HighestDshVersion $vers } else { 'unknown' }; Write-Host ('dsh-launcher ' + $ver); Write-Host ('DeepSeek Harness ' + $local)"
-exit /b 0
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :uninstall
 echo Removing deepseek command from PATH...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
-exit /b 0
-
-:uninstall-full
-echo Full uninstall (PATH + install dir + logs + shortcut)...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1" -Full
-exit /b 0
+if defined FULL (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1" -Full
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0uninstall.ps1"
+)
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 :help
 echo Usage:
 echo   deepseek                start in foreground mode (default)
 echo   deepseek -b / -d        submit background startup and return immediately
-echo   deepseek --status       check service state (ready/starting/not running)
-echo   deepseek --stop         stop the running service
+echo   deepseek --status       check service state (starting/ready/unhealthy/foreign-port/failed/stopped)
+echo   deepseek --stop         stop the service
 echo   deepseek --logs [N]     show last N lines of the background log (default 20)
 echo   deepseek --version      show launcher and DeepSeek Harness versions
 echo   deepseek --update       check for a newer DeepSeek Harness version
@@ -156,6 +175,7 @@ echo   deepseek --uninstall    remove this command from PATH
 echo   deepseek --uninstall --full   remove everything (PATH, install dir, logs, shortcut)
 echo   deepseek --check        check environment and exit
 echo   deepseek --help         show this help
+echo   Only one action may be used per invocation (--full requires --uninstall).
 rem call :help must return to the validation error path, so do not exit here.
 rem The top-level goto help path preserves the current success errorlevel.
 goto :eof
@@ -166,3 +186,51 @@ echo Script dir: %~dp0
 where npm >nul 2>&1 && echo npm: found || echo npm: NOT FOUND
 echo GUI address: http://127.0.0.1:3080
 exit /b 0
+
+rem Subroutine: map one argument token to its canonical action name.  Sets
+rem ACTION on first hit and CONFLICT when a different action token arrives.
+:classify
+set "CLASSIFY_TOKEN=%~1"
+set "CLASSIFY_THIS="
+if /i "%CLASSIFY_TOKEN%"=="--full" (
+    if defined FULL set "BADARG=duplicate --full"
+    set "FULL=1"
+    goto :eof
+)
+echo(%CLASSIFY_TOKEN%| findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
+if not errorlevel 1 (
+    if /i not "%ACTION%"=="logs" set "BADARG=%CLASSIFY_TOKEN%"
+    if defined LOG_COUNT set "BADARG=%CLASSIFY_TOKEN%"
+    set "LOG_COUNT=%CLASSIFY_TOKEN%"
+    goto :eof
+)
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--background$" /c:"^-b$" /c:"^--bg$" /c:"^--daemon$" /c:"^-d$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=background"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--stop$" /c:"^stop$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=stop"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--status$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=status"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--logs$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=logs"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--upgrade$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=upgrade"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--update$" /c:"^update$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=update"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--version$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=version"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--uninstall$" /c:"^uninstall$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=uninstall"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--help$" /c:"^-h$" /c:"^/\?$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=help"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--check$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=check"
+if not defined CLASSIFY_THIS (
+    set "BADARG=%CLASSIFY_TOKEN%"
+    goto :eof
+)
+if not defined ACTION (
+    set "ACTION=%CLASSIFY_THIS%"
+    goto :eof
+)
+if /i not "%ACTION%"=="%CLASSIFY_THIS%" set "CONFLICT=%ACTION% and %CLASSIFY_THIS%"
+goto :eof

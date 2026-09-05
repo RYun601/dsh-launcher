@@ -1,0 +1,464 @@
+function ConvertFrom-DshWindowsCommandLine {
+    param([string]$CommandLine)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return @()
+    }
+
+    if (-not ('DshLauncher.NativeCommandLine' -as [type])) {
+        $typeDefinition = @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace DshLauncher
+{
+    public static class NativeCommandLine
+    {
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(
+            [MarshalAs(UnmanagedType.LPWStr)] string commandLine,
+            out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string[] Split(string commandLine)
+        {
+            int argumentCount;
+            IntPtr argumentPointer = CommandLineToArgvW(commandLine, out argumentCount);
+            if (argumentPointer == IntPtr.Zero)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            try
+            {
+                string[] arguments = new string[argumentCount];
+                for (int index = 0; index < argumentCount; index++)
+                {
+                    IntPtr value = Marshal.ReadIntPtr(argumentPointer, index * IntPtr.Size);
+                    arguments[index] = Marshal.PtrToStringUni(value);
+                }
+                return arguments;
+            }
+            finally
+            {
+                LocalFree(argumentPointer);
+            }
+        }
+    }
+}
+'@
+        try {
+            Add-Type -TypeDefinition $typeDefinition -Language CSharp -ErrorAction Stop | Out-Null
+        } catch {
+            return @()
+        }
+    }
+
+    try {
+        return @([DshLauncher.NativeCommandLine]::Split($CommandLine))
+    } catch {
+        return @()
+    }
+}
+
+function Test-DshCommandLineArgument {
+    param(
+        [string]$CommandLine,
+        [string]$ExpectedPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine) -or [string]::IsNullOrWhiteSpace($ExpectedPath)) {
+        return $false
+    }
+
+    try {
+        $normalizedExpectedPath = [IO.Path]::GetFullPath($ExpectedPath)
+    } catch {
+        return $false
+    }
+
+    $arguments = @(ConvertFrom-DshWindowsCommandLine -CommandLine $CommandLine)
+    for ($index = 1; $index -lt $arguments.Count; $index++) {
+        $argument = [string]$arguments[$index]
+        if (-not [IO.Path]::IsPathRooted($argument)) {
+            continue
+        }
+        try {
+            $normalizedArgument = [IO.Path]::GetFullPath($argument)
+        } catch {
+            continue
+        }
+        if ([string]::Equals(
+                $normalizedArgument,
+                $normalizedExpectedPath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-DshPortOwner {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)]
+        [int]$Port
+    )
+
+    try {
+        $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+    $loopbackCandidates = @($connections | Where-Object {
+        [string]$_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::')
+    })
+    if ($loopbackCandidates.Count -eq 0) {
+        return $null
+    }
+
+    $candidateOwners = @($loopbackCandidates | Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($candidateOwners.Count -ne 1) {
+        return $null
+    }
+
+    $connection = $loopbackCandidates | Select-Object -First 1
+    return [pscustomobject]@{
+        ProcessId     = [int]$connection.OwningProcess
+        OwningProcess = [int]$connection.OwningProcess
+        LocalAddress  = [string]$connection.LocalAddress
+        LocalPort     = [int]$connection.LocalPort
+    }
+}
+
+function Test-DshProcessIdentity {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint
+    )
+
+    if ($ProcessId -le 0) {
+        return $false
+    }
+
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+    } catch {
+        return $false
+    }
+    if (-not $process) {
+        return $false
+    }
+
+    $processName = [string]$process.Name
+    if ($processName -notmatch '^(?i:node(?:\.exe)?)$') {
+        return $false
+    }
+
+    return Test-DshCommandLineArgument -CommandLine ([string]$process.CommandLine) `
+        -ExpectedPath $ExpectedEntrypoint
+}
+
+function Test-DshServiceDescendsFromRunner {
+    param(
+        [Parameter(Mandatory = $true)][int]$ServicePid,
+        [Parameter(Mandatory = $true)][int]$RunnerPid
+    )
+
+    if ($ServicePid -le 0 -or $RunnerPid -le 0 -or $ServicePid -eq $RunnerPid) {
+        return $false
+    }
+
+    $currentPid = $ServicePid
+    $visited = @{}
+    for ($depth = 0; $depth -lt 64; $depth++) {
+        if ($visited.ContainsKey($currentPid)) { return $false }
+        $visited[$currentPid] = $true
+        try {
+            $process = Get-CimInstance Win32_Process -Filter "ProcessId=$currentPid" -ErrorAction Stop
+        } catch {
+            return $false
+        }
+        if (-not $process -or $null -eq $process.ParentProcessId) { return $false }
+        $parentPid = [int]$process.ParentProcessId
+        if ($parentPid -eq $RunnerPid) { return $true }
+        if ($parentPid -le 0) { return $false }
+        $currentPid = $parentPid
+    }
+    return $false
+}
+
+function Test-DshStartupLockIdentity {
+    param(
+        [string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedStartupToken,
+        [Parameter(Mandatory = $true)][int]$RunnerPid
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return $true }
+    $identityPath = Join-Path (Join-Path $LaunchRoot 'dsh-startup.lock') 'identity.json'
+    try {
+        if (-not (Test-Path -LiteralPath $identityPath)) { return $false }
+        $identity = Get-Content -LiteralPath $identityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [int]$identity.OwnerPid -eq $RunnerPid -and
+            [string]::Equals([string]$identity.Token, $ExpectedStartupToken, [StringComparison]::Ordinal)
+    } catch {
+        return $false
+    }
+}
+
+function Get-DshStartupUrl {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+
+    # 无启动根目录（如外部调用方）时优雅回退到默认探测地址。
+    if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return '' }
+    $logPath = Join-Path $LaunchRoot 'dsh-background.log'
+    if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return '' }
+
+    try {
+        $logText = [IO.File]::ReadAllText($logPath, [Text.Encoding]::UTF8)
+    } catch {
+        return ''
+    }
+
+    $sectionMarkers = [regex]::Matches($logText, '(?m)^===== ')
+    if ($sectionMarkers.Count -gt 0) {
+        $logText = $logText.Substring($sectionMarkers[$sectionMarkers.Count - 1].Index)
+    }
+
+    $pattern = "(?im)^\s*dsh web:\s+(?<Url>http://127\.0\.0\.1:$Port(?:/\?token=[^\s]+)?)\s*$"
+    $matches = [regex]::Matches($logText, $pattern)
+    if ($matches.Count -eq 0) { return '' }
+    return [string]$matches[$matches.Count - 1].Groups['Url'].Value
+}
+
+function Invoke-DshHttpProbe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)]
+        [int]$Port,
+        [string]$Uri
+    )
+
+    $response = $null
+    $failureMessage = ''
+    try {
+        if ([string]::IsNullOrWhiteSpace($Uri)) { $Uri = "http://127.0.0.1:$Port/" }
+        $request = [Net.HttpWebRequest]::Create($Uri)
+        $request.Method = 'GET'
+        # DSH 0.1.2-alpha.4 exchanges the startup token for an auth cookie via
+        # 303 Location: /. Keep the cookie while following that redirect.
+        $request.AllowAutoRedirect = $true
+        $request.CookieContainer = [Net.CookieContainer]::new()
+        $request.Timeout = 2000
+        $request.ReadWriteTimeout = 2000
+        $response = $request.GetResponse()
+    } catch [Net.WebException] {
+        $failureMessage = $_.Exception.Message
+        $response = $_.Exception.Response
+    } catch {
+        return [pscustomobject]@{
+            IsReady   = $false
+            StatusCode = $null
+            BodyMatches = $false
+            Message   = $_.Exception.Message
+        }
+    }
+
+    if (-not $response) {
+        return [pscustomobject]@{
+            IsReady    = $false
+            StatusCode = $null
+            BodyMatches = $false
+            Message    = $failureMessage
+        }
+    }
+
+    try {
+        $statusCode = [int]$response.StatusCode
+        $stream = $response.GetResponseStream()
+        $buffer = New-Object byte[] 8192
+        $bodyBuffer = [IO.MemoryStream]::new()
+        try {
+            $maximumBytes = 256KB
+            while ($bodyBuffer.Length -lt $maximumBytes) {
+                $remaining = [int]($maximumBytes - $bodyBuffer.Length)
+                $readLength = [Math]::Min($buffer.Length, $remaining)
+                $read = $stream.Read($buffer, 0, $readLength)
+                if ($read -le 0) { break }
+                $bodyBuffer.Write($buffer, 0, $read)
+            }
+            $body = [Text.Encoding]::UTF8.GetString($bodyBuffer.ToArray())
+        } finally {
+            $bodyBuffer.Dispose()
+            if ($stream) { $stream.Dispose() }
+        }
+
+        $bodyMatches = $body -match 'id=[\x22\x27]root[\x22\x27]'
+        $successfulStatus = $statusCode -ge 200 -and $statusCode -lt 400
+        $message = if (-not $successfulStatus) {
+            "HTTP returned status $statusCode"
+        } elseif (-not $bodyMatches) {
+            'HTTP response is not a DeepSeek Harness page'
+        } else {
+            'DeepSeek Harness HTTP endpoint is ready'
+        }
+        return [pscustomobject]@{
+            IsReady    = $successfulStatus -and $bodyMatches
+            StatusCode = $statusCode
+            BodyMatches = $bodyMatches
+            Message    = $message
+        }
+    } catch {
+        return [pscustomobject]@{
+            IsReady    = $false
+            StatusCode = $null
+            BodyMatches = $false
+            Message    = $_.Exception.Message
+        }
+    } finally {
+        $response.Dispose()
+    }
+}
+
+function New-DshServiceClassificationResult {
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [int]$ServicePid,
+        [Parameter(Mandatory = $true)][string]$Message,
+        $HttpStatus,
+        [Parameter(Mandatory = $true)][string]$Entrypoint
+    )
+
+    return [pscustomobject][ordered]@{
+        State      = $State
+        ServicePid = $ServicePid
+        Message    = $Message
+        HttpStatus = $HttpStatus
+        Entrypoint = $Entrypoint
+    }
+}
+
+function Get-DshServiceClassification {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)]
+        [int]$Port,
+        [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint,
+        [string]$ExpectedStartupToken,
+        [int]$RunnerPid,
+        [string]$LaunchRoot
+    )
+
+    try {
+        $entrypoint = [IO.Path]::GetFullPath($ExpectedEntrypoint)
+    } catch {
+        $entrypoint = $ExpectedEntrypoint
+    }
+
+    $owner = Get-DshPortOwner -Port $Port
+    if (-not $owner) {
+        return New-DshServiceClassificationResult -State 'STOPPED' -ServicePid 0 `
+            -Message "Port $Port is not listening" -HttpStatus $null -Entrypoint $entrypoint
+    }
+
+    $servicePid = [int]$owner.ProcessId
+    if (-not (Test-DshProcessIdentity -ProcessId $servicePid -ExpectedEntrypoint $entrypoint)) {
+        # DSH startup may place the listener in a runner-descendant subprocess
+        # (platform proxy / tool subprocess). A listener that truly descends from
+        # the current runner belongs to this startup; report it as not-ready
+        # instead of a foreign port. Genuinely external processes stay FOREIGN_PORT.
+        if ($RunnerPid -gt 0 -and
+            (Test-DshServiceDescendsFromRunner -ServicePid $servicePid -RunnerPid $RunnerPid)) {
+            return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+                -Message 'The DeepSeek Harness listener is a runner subprocess with an unrecognized entrypoint' `
+                -HttpStatus $null -Entrypoint $entrypoint
+        }
+        return New-DshServiceClassificationResult -State 'FOREIGN_PORT' -ServicePid $servicePid `
+            -Message "Port $Port is owned by a process that is not DeepSeek Harness" `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedStartupToken)) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The DeepSeek Harness listener has no startup token evidence' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+    if (-not (Test-DshStartupLockIdentity -LaunchRoot $LaunchRoot -ExpectedStartupToken $ExpectedStartupToken -RunnerPid $RunnerPid)) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The startup token is not bound to the current runner lock identity' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+
+    $runner = if ($RunnerPid -gt 0) {
+        Get-Process -Id $RunnerPid -ErrorAction SilentlyContinue
+    } else {
+        $null
+    }
+    if (-not $runner) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The DeepSeek Harness listener has no live runner evidence' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+    if (-not (Test-DshServiceDescendsFromRunner -ServicePid $servicePid -RunnerPid $RunnerPid)) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message 'The DeepSeek Harness listener is not a descendant of the expected runner' `
+            -HttpStatus $null -Entrypoint $entrypoint
+    }
+
+    $probeUri = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port
+    $probe = Invoke-DshHttpProbe -Port $Port -Uri $probeUri
+    if (-not $probe.IsReady) {
+        return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `
+            -Message $probe.Message -HttpStatus $probe.StatusCode -Entrypoint $entrypoint
+    }
+
+    return New-DshServiceClassificationResult -State 'READY' -ServicePid $servicePid `
+        -Message 'DeepSeek Harness service identity and HTTP health are verified' `
+        -HttpStatus $probe.StatusCode -Entrypoint $entrypoint
+}
+
+function Wait-DshServiceIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 65535)]
+        [int]$Port,
+        [Parameter(Mandatory = $true)][string]$ExpectedEntrypoint,
+        [string]$ExpectedStartupToken,
+        [int]$RunnerPid,
+        [string]$LaunchRoot,
+        [ValidateRange(0, 60000)]
+        [int]$StableMilliseconds = 0,
+        [ValidateRange(1, 60000)]
+        [int]$PollMilliseconds = 100
+    )
+
+    $pinnedServicePid = 0
+    $stableTimer = [Diagnostics.Stopwatch]::new()
+    while ($true) {
+        $classification = Get-DshServiceClassification -Port $Port `
+            -ExpectedEntrypoint $ExpectedEntrypoint -ExpectedStartupToken $ExpectedStartupToken `
+            -RunnerPid $RunnerPid -LaunchRoot $LaunchRoot
+        if ($classification.State -ne 'READY') {
+            return $classification
+        }
+        if ($StableMilliseconds -eq 0) {
+            return $classification
+        }
+
+        if ($pinnedServicePid -ne $classification.ServicePid) {
+            $pinnedServicePid = $classification.ServicePid
+            $stableTimer.Restart()
+        } elseif ($stableTimer.ElapsedMilliseconds -ge $StableMilliseconds) {
+            return $classification
+        }
+
+        Start-Sleep -Milliseconds $PollMilliseconds
+    }
+}

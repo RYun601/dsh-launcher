@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$Version,
 
@@ -6,7 +6,9 @@ param(
 
     [string[]]$DshArguments = @('web'),
 
-    [switch]$NoOpen
+    [switch]$NoOpen,
+
+    [switch]$PrepareOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,14 +23,29 @@ if (-not $RuntimeRoot.StartsWith($launchRootPrefix, [StringComparison]::OrdinalI
     throw "RuntimeRoot must be inside the launcher-owned directory: $launchRoot"
 }
 
+# Node.js 版本前置检查：准备或启动运行时之前失败，避免错误滞后且难以定位。
+. (Join-Path $PSScriptRoot 'dsh-node-version.ps1')
+if (-not (Assert-DshNodeEnvironment)) { exit 1 }
+
 $nodeModules = Join-Path $RuntimeRoot 'node_modules'
 $dshRoot = Join-Path (Join-Path $nodeModules '@deepseek-ai') 'dsh'
 $dshEntrypoint = Join-Path $dshRoot 'lib\bin.js'
 $readyMarker = Join-Path $RuntimeRoot 'dsh-runtime-ready.json'
 $auditLog = Join-Path $RuntimeRoot 'dsh-dependency-audit.log'
 
+function Test-RuntimeEntrypointSane {
+    # 真实发布的 DSH 入口文件是打包后的完整 bundle（数千字节）；占位/存根入口
+    # （5 字节内容，如测试夹具或失败安装遗留）不能视为有效运行时。
+    if (-not (Test-Path -LiteralPath $dshEntrypoint -PathType Leaf)) { return $false }
+    try {
+        return (Get-Item -LiteralPath $dshEntrypoint).Length -ge 1024
+    } catch {
+        return $false
+    }
+}
+
 function Test-RuntimeReady {
-    if (-not (Test-Path -LiteralPath $readyMarker) -or -not (Test-Path -LiteralPath $dshEntrypoint)) {
+    if (-not (Test-Path -LiteralPath $readyMarker) -or -not (Test-RuntimeEntrypointSane)) {
         return $false
     }
 
@@ -43,7 +60,7 @@ function Test-RuntimeReady {
 }
 
 function Test-RuntimeInstalledVersion {
-    if (-not (Test-Path -LiteralPath $dshEntrypoint)) { return $false }
+    if (-not (Test-RuntimeEntrypointSane)) { return $false }
     $packageJson = Join-Path $dshRoot 'package.json'
     if (-not (Test-Path -LiteralPath $packageJson)) { return $false }
     try {
@@ -184,11 +201,7 @@ try {
 
     if (-not (Test-RuntimeReady)) {
         if (-not (Test-RuntimeInstalledVersion)) {
-            if (Test-Path -LiteralPath $RuntimeRoot) {
-                Remove-Item -LiteralPath $RuntimeRoot -Recurse -Force
-            }
             New-Item -ItemType Directory -Force -Path $RuntimeRoot | Out-Null
-
             Write-Output "Preparing DeepSeek Harness runtime $Version..."
             Invoke-NpmInstall -PackageSpecs @("@deepseek-ai/dsh@$Version")
         } else {
@@ -246,9 +259,13 @@ try {
     if ($NoOpen -and $DshArguments -notcontains '--no-open') {
         $DshArguments = @($DshArguments) + '--no-open'
     }
-    Write-Output 'Starting DeepSeek Harness web service...'
-    & node $dshEntrypoint @DshArguments
-    $nodeExitCode = $LASTEXITCODE
+    if ($PrepareOnly) {
+        $nodeExitCode = 0
+    } else {
+        Write-Output 'Starting DeepSeek Harness web service...'
+        & node $dshEntrypoint @DshArguments
+        $nodeExitCode = $LASTEXITCODE
+    }
 } finally {
     if ($ownsRuntimeMutex) { $runtimeMutex.ReleaseMutex() }
     $runtimeMutex.Dispose()

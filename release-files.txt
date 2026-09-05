@@ -3,6 +3,9 @@ background-run.ps1
 deepseek.cmd
 deepseek.ico
 dsh-launch-state.ps1
+dsh-service-health.ps1
+dsh-node-version.ps1
+dsh-runtime-layout.ps1
 dsh-version.ps1
 install-command.cmd
 install.ps1
@@ -13,6 +16,7 @@ README.md
 resolve-dsh-version.ps1
 run-dsh.ps1
 set-shortcut.ps1
+start-foreground.ps1
 start-background.cmd
 start-background.ps1
 start-deepseek-harness.bat
