@@ -51,6 +51,11 @@
 - `VERSION`：启动器版本；发布标签必须与其组成 `v<VERSION>`。
 - `README.md` / `README.en.md`：面向最终用户的中英文文档，用户可见行为变化时必须同步。
 
+### 开发验收与 Release 边界
+
+- 完整 Windows 行为套件是开发完成和 PR/main 的回归验收要求。创建发布标签前，必须在待发布的同一个 commit 上完成 Windows 行为验收。
+- Release 工作流不重复执行完整 Windows 行为套件，仅保留发行文件检查、版本检查、打包和最终归档冒烟测试。完整套件失败时应在开发验收或 `check.yml` 中处理，不应通过降低断言来让 Release 通过。
+
 ## 运行环境与兼容性
 
 ### Windows PowerShell 5.1 是生产基线
@@ -211,7 +216,7 @@ if ($LASTEXITCODE -ne 0) { throw 'release package behavior test failed' }
 - 改动范围是否只覆盖任务需要的文件，且未覆盖用户已有修改。
 - 相关单个行为测试是否通过。
 - `release-files.txt` 中的 PowerShell 脚本是否全部解析成功。
-- 完整 Windows 行为套件是否通过；若受环境限制未完成，是否准确记录失败位置和原因。
+- 完整 Windows 行为套件是否通过；准备发布时，该验收必须针对待发布的同一个 commit；若受环境限制未完成，是否准确记录失败位置和原因。
 - 用户可见变化是否同步到中英文 README。
 - 新增运行时文件是否同步到 `release-files.txt`。
 - `install.ps1` 是否仍为 UTF-8 无 BOM。

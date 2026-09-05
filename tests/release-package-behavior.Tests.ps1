@@ -1,6 +1,7 @@
 param([string]$ArchivePath)
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $repoRoot 'release-files.txt'
@@ -109,6 +110,16 @@ try {
     Assert-Match $releaseWorkflow '(?m)^\s+name:\s+\$\{\{\s*github\.ref_name\s*\}\}\s*$' `
         'Release workflow must set the GitHub Release title from the pushed tag'
     Assert-Match $releaseWorkflow 'VERSION' 'Release workflow must compare the tag with VERSION'
+    Assert-Match $releaseWorkflow '(?m)^\s+- name:\s+Validate PowerShell scripts parse\s*$' `
+        'Release workflow must keep the release-file PowerShell parse check'
+    Assert-Match $releaseWorkflow '(?m)^\s+- name:\s+Validate install\.ps1 has NO BOM\s*$' `
+        'Release workflow must keep the installer encoding check'
+    Assert-Match $releaseWorkflow '(?m)^\s+- name:\s+Prepare package\s*$' `
+        'Release workflow must keep package assembly'
+    Assert-Match $releaseWorkflow '(?m)^\s+- name:\s+Smoke test extracted release archive\s*$' `
+        'Release workflow must keep the extracted archive smoke test'
+    Assert-True ($releaseWorkflow -notmatch '(?m)^\s+- name:\s+Run complete Windows behavior suite\s*$') `
+        'Release workflow should leave the full Windows behavior suite to the branch checks'
     $releaseFiles = @(Get-Content -LiteralPath $manifestPath | Where-Object { $_ -and -not $_.StartsWith('#') })
     if ($ArchivePath) {
         if (-not (Test-Path -LiteralPath $ArchivePath -PathType Leaf)) { throw "Release archive is missing: $ArchivePath" }

@@ -65,31 +65,11 @@ jobs:
           grep -q 'BADARG' deepseek.cmd || { echo "::error::deepseek.cmd missing unknown-argument validation"; exit 1; }
           echo "cmd files OK"
 
-      - name: Run complete Windows behavior suite
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          for ($attempt = 1; $attempt -le 2; $attempt++) {
-            Write-Host "--- Suite attempt $attempt ---"
-            try {
-              $tests = @(Get-ChildItem ./tests -Filter '*.Tests.ps1' | Sort-Object Name)
-              foreach ($test in $tests) {
-                Write-Host "Running $($test.Name)..."
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $test.FullName
-                if ($LASTEXITCODE -ne 0) { throw "$($test.Name) failed with exit code $LASTEXITCODE" }
-              }
-              break
-            } catch {
-              if ($attempt -eq 2) { throw }
-              Write-Host "Suite attempt $attempt failed; retrying once: $_"
-              Start-Sleep -Seconds 20
-            }
-          }
-
       - name: Prepare package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
           $packageRoot = Join-Path $PWD 'dist/dsh-launcher'
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
           foreach ($file in @(Get-Content release-files.txt | Where-Object { $_ -and -not $_.StartsWith('#') })) {
