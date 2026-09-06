@@ -52,11 +52,12 @@ $script:cimUnavailable = $false
 function global:Get-NetTCPConnection {
     param([int]$LocalPort, [string]$State)
     if ($env:DSH_STOP_HAS_LISTENER -ne '1') { return $null }
+    $ownerForListener = $(if ($scenario -eq 'foreign' -or $scenario -like 'foreign-cmdline-*') { $foreignPid } elseif ($scenario -eq 'runner-service-distinct') { $servicePid } else { $ownerPid })
     return @([pscustomobject]@{
         LocalAddress  = '127.0.0.1'
         LocalPort     = $LocalPort
         State         = $State
-        OwningProcess = $(if ($scenario -eq 'foreign') { $foreignPid } elseif ($scenario -eq 'runner-service-distinct') { $servicePid } else { $ownerPid })
+        OwningProcess = $ownerForListener
     })
 }
 
@@ -86,6 +87,47 @@ function global:Get-CimInstance {
             CommandLine   = 'C:\Windows\System32\svchost.exe -k unrelated-local-service'
         }
     }
+    if ($scenario -eq 'foreign-cmdline-node-mention') {
+        # 审查 R1 复现：整条命令行包含 run-dsh.ps1 子串，但执行的是无关程序。
+        return [pscustomobject]@{
+            ProcessId      = $queriedPid
+            Name           = 'node.exe'
+            ExecutablePath = 'C:\Program Files\nodejs\node.exe'
+            CommandLine    = 'node.exe C:\unrelated\server.js --log-path C:\notes\run-dsh.ps1'
+        }
+    }
+    if ($scenario -eq 'foreign-cmdline-ps-mention') {
+        return [pscustomobject]@{
+            ProcessId      = $queriedPid
+            Name           = 'powershell.exe'
+            ExecutablePath = $exePath
+            CommandLine    = ($exePath + ' -Command "& ''C:\notes\run-dsh.ps1''"')
+        }
+    }
+    if ($scenario -eq 'foreign-cmdline-wrong-entry') {
+        return [pscustomobject]@{
+            ProcessId      = $queriedPid
+            Name           = 'node.exe'
+            ExecutablePath = 'C:\Program Files\nodejs\node.exe'
+            CommandLine    = 'node.exe C:\unrelated\server.js web'
+        }
+    }
+    if ($scenario -eq 'cim-unavailable') {
+        throw 'Injected CIM identity query failure'
+    }
+    if ($scenario -eq 'pid-reuse-lock-owner') {
+        # 锁所有者 PID 已被无关进程复用：停止脚本绝不能按旧锁 PID 终止。
+        return [pscustomobject]@{
+            ProcessId      = $queriedPid
+            Name           = 'notepad.exe'
+            ExecutablePath = 'C:\Windows\System32\notepad.exe'
+            CommandLine    = '"C:\Windows\System32\notepad.exe" C:\notes\todo.txt'
+        }
+    }
+    $ownerScriptPath = $fakeScriptPath
+    if ($env:DSH_STOP_TEST_OWNER_SCRIPT) {
+        $ownerScriptPath = Join-Path $env:DSH_STOP_TEST_FAKES $env:DSH_STOP_TEST_OWNER_SCRIPT
+    }
     if ($scenario -eq 'runner-service-distinct' -and $queriedPid -eq $servicePid) {
         return [pscustomobject]@{
             ProcessId       = $queriedPid
@@ -99,7 +141,7 @@ function global:Get-CimInstance {
         ProcessId      = $queriedPid
         Name           = 'powershell.exe'
         ExecutablePath = $exePath
-        CommandLine    = ($exePath + ' -File "' + $fakeScriptPath + '" -Version 0.1.0-rc.8')
+        CommandLine    = ($exePath + ' -File "' + $ownerScriptPath + '" -Version 0.1.0-rc.8')
     }
 }
 
@@ -160,13 +202,16 @@ function New-IdentityStartupLock {
     New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
     $harnessPid = $PID
     $exePath = (Get-Process -Id $harnessPid).Path
-    $fakeScriptPath = Join-Path $fakeScriptRoot 'background-run.ps1'
+    $ownerScriptPath = Join-Path $fakeScriptRoot 'background-run.ps1'
+    if ($env:DSH_STOP_TEST_OWNER_SCRIPT) {
+        $ownerScriptPath = Join-Path $fakeScriptRoot $env:DSH_STOP_TEST_OWNER_SCRIPT
+    }
     $identity = [ordered]@{
         SchemaVersion = 1
         OwnerPid      = $harnessPid
         Token         = 'a' * 32
         CommandPath   = $exePath
-        ScriptPath    = $fakeScriptPath
+        ScriptPath    = $ownerScriptPath
         CreatedAt     = (Get-Date).ToUniversalTime().ToString('o')
     }
     [IO.File]::WriteAllText(
@@ -182,7 +227,8 @@ function Invoke-StopScenario {
         [string]$HasListener = '0',
         [string]$TaskkillExit = '0',
         [string]$TaskkillReleases = '0',
-        [string]$TaskkillFailsButReleases = '0'
+        [string]$TaskkillFailsButReleases = '0',
+        [string]$OwnerScript = ''
     )
 
     $previousProfile = $env:DSH_STOP_TEST_PROFILE
@@ -198,6 +244,7 @@ function Invoke-StopScenario {
     $previousFailButRelease = $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES
     $previousGone = $env:DSH_STOP_PROCESS_GONE
     $previousServicePid = $env:DSH_STOP_SERVICE_PID
+    $previousOwnerScript = $env:DSH_STOP_TEST_OWNER_SCRIPT
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         New-Item -ItemType Directory -Force -Path $launchRoot | Out-Null
@@ -212,6 +259,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_TASKKILL_EXIT = $TaskkillExit
         $env:DSH_STOP_TASKKILL_RELEASES = $TaskkillReleases
         $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES = $TaskkillFailsButReleases
+        $env:DSH_STOP_TEST_OWNER_SCRIPT = $OwnerScript
         $env:DSH_STOP_PROCESS_GONE = '0'
         $env:DSH_STOP_OWNER_PID = [string]$PID
         $env:DSH_STOP_SERVICE_PID = [string]($PID + 1000)
@@ -240,6 +288,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES = $previousFailButRelease
         $env:DSH_STOP_PROCESS_GONE = $previousGone
         $env:DSH_STOP_SERVICE_PID = $previousServicePid
+        $env:DSH_STOP_TEST_OWNER_SCRIPT = $previousOwnerScript
         $ErrorActionPreference = $previousErrorActionPreference
         if (Test-Path -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock')) {
             Remove-Item -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock') -Recurse -Force
@@ -304,6 +353,48 @@ try {
         Assert-Equal 0 $result.ExitCode 'A foreign occupant must not fail the stop command itself'
         Assert-Equal '' $result.KillLog 'The foreign process must never appear in the kill log'
         Assert-Match $result.Output '30880.*PID|PID.*30880' 'The report must point at the occupied port and owner'
+    }
+
+    Invoke-Test 'a node command line that merely mentions run-dsh.ps1 is never killed' {
+        # R1 复现：整条命令行的子串包含启动脚本名，但执行的是无关程序。
+        $result = Invoke-StopScenario -Scenario 'foreign-cmdline-node-mention' -HasListener '1'
+        Assert-Equal 0 $result.ExitCode 'A foreign occupant must not fail the stop command itself'
+        Assert-Equal '' $result.KillLog 'A command line that merely mentions run-dsh.ps1 must never be killed'
+        Assert-Match $result.Output '30880.*PID|PID.*30880' 'The report must point at the occupied port and owner'
+    }
+
+    Invoke-Test 'a powershell -Command argument mentioning a launcher script is never killed' {
+        $result = Invoke-StopScenario -Scenario 'foreign-cmdline-ps-mention' -HasListener '1'
+        Assert-Equal 0 $result.ExitCode 'A foreign occupant must not fail the stop command itself'
+        Assert-Equal '' $result.KillLog 'A -Command argument mentioning run-dsh.ps1 must never grant stop permission'
+        Assert-Match $result.Output '30880.*PID|PID.*30880' 'The report must point at the occupied port and owner'
+    }
+
+    Invoke-Test 'a node process with a different entrypoint is never killed' {
+        $result = Invoke-StopScenario -Scenario 'foreign-cmdline-wrong-entry' -HasListener '1'
+        Assert-Equal 0 $result.ExitCode 'A foreign occupant must not fail the stop command itself'
+        Assert-Equal '' $result.KillLog 'Only the managed DSH entrypoint may be stopped through the port'
+        Assert-Match $result.Output '30880.*PID|PID.*30880' 'The report must point at the occupied port and owner'
+    }
+
+    Invoke-Test 'an identity query failure never issues a kill call' {
+        $result = Invoke-StopScenario -Scenario 'cim-unavailable' -HasListener '1'
+        Assert-Equal '' $result.KillLog 'An indeterminate process identity must never be killed'
+        Assert-Equal 1 $result.ExitCode 'An indeterminate identity must be reported as a stop failure'
+    }
+
+    Invoke-Test 'a reused lock owner PID running an unrelated program is never killed' {
+        $result = Invoke-StopScenario -Scenario 'pid-reuse-lock-owner'
+        Assert-Equal '' $result.KillLog 'A stale lock whose PID was reused must never be killed'
+        Assert-Equal 0 $result.ExitCode 'A stale lock must be cleaned, not reported as a stop failure'
+    }
+
+    Invoke-Test 'a foreground STARTING owner is identified through its verified lock' {
+        $result = Invoke-StopScenario -Scenario 'foreground-owner' -TaskkillReleases '1' `
+            -OwnerScript 'start-foreground.ps1'
+        Assert-Equal 0 $result.ExitCode "A verified foreground stop must succeed. Output:`n$($result.Output)"
+        Assert-Match $result.KillLog '/PID \d+ /T /F' 'Stop must taskkill the verified foreground owner tree'
+        Assert-Match $result.Output 'PID' 'Success output must identify the stopped process'
     }
 
     Write-Host "All $script:Passed stop behavior tests passed."

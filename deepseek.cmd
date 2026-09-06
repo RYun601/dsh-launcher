@@ -80,6 +80,16 @@ if /i "%ACTION%"=="update" (
     set "DSH_RC=!ERRORLEVEL!"
     exit /b !DSH_RC!
 )
+if /i "%ACTION%"=="update-launcher" (
+    call :update-launcher
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+rem Self-overwrite-safe dispatch: --upgrade-launcher replaces this file while it
+rem is still executing. The target label parses its entire invocation line
+rem (child + delayed-expansion exit) before the replacement happens, and goto
+rem dispatch never returns to a stale line offset in the rewritten file.
+if /i "%ACTION%"=="upgrade-launcher" goto upgrade-launcher
 if /i "%ACTION%"=="version" (
     call :version
     set "DSH_RC=!ERRORLEVEL!"
@@ -124,14 +134,20 @@ set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
 :status
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-launch-state.ps1" -Action GetStatus
+if defined STATUS_JSON (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-launch-state.ps1" -Action GetStatusJson
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-launch-state.ps1" -Action GetStatus
+)
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
 :logs
 set "COUNT=20"
 if defined LOG_COUNT set "COUNT=%LOG_COUNT%"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$log=Join-Path $env:USERPROFILE 'dsh-launch\dsh-background.log'; if (Test-Path $log) { Get-Content $log -Tail %COUNT% -Encoding UTF8 } else { Write-Host ('No log yet: ' + $log) }"
+set "LOG_ARGS="
+if defined LOG_FOLLOW set "LOG_ARGS=-Follow"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-logs.ps1" -Count %COUNT% !LOG_ARGS!
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
@@ -146,10 +162,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-check.ps1"
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
-:version
-powershell -NoProfile -ExecutionPolicy Bypass -Command ". '%~dp0dsh-version.ps1'; $ver = if (Test-Path '%~dp0VERSION') { (Get-Content '%~dp0VERSION' -Raw).Trim() } else { 'unknown' }; $vers = @(); $cacheRoot = Join-Path $env:LOCALAPPDATA 'npm-cache\_npx'; if (Test-Path $cacheRoot) { Get-ChildItem $cacheRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object { $pj = Join-Path $_.FullName 'node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $pj) { try { $vers += (Get-Content $pj -Raw | ConvertFrom-Json).version } catch {} } } }; $runtimePj = Join-Path $env:USERPROFILE 'dsh-launch\runtime\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $runtimePj) { try { $vers += (Get-Content $runtimePj -Raw | ConvertFrom-Json).version } catch {} }; $gpj = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'; if (Test-Path $gpj) { try { $vers += (Get-Content $gpj -Raw | ConvertFrom-Json).version } catch {} }; $local = if ($vers.Count) { Get-HighestDshVersion $vers } else { 'unknown' }; Write-Host ('dsh-launcher ' + $ver); Write-Host ('DeepSeek Harness ' + $local)"
+:update-launcher
+rem Query only: no file is replaced, so a normal call dispatch is safe here.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-launcher.ps1"
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
+
+:upgrade-launcher
+rem Self-overwrite: update-launcher.ps1 replaces this file mid-execution. The
+rem whole line below (child invocation plus the delayed-expansion exit) is
+rem parsed before the replacement, and `exit /b !ERRORLEVEL!` in the main
+rem context ends the batch without reading the rewritten file again.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-launcher.ps1" -Upgrade & exit /b !ERRORLEVEL!
+
+:version
+rem R8: version lookup lives in version-info.ps1; -File quoting survives
+rem install paths containing spaces, single quotes or non-ASCII characters,
+rem which the old inline -Command string injection did not. Delayed expansion
+rem is disabled in this block so an exclamation mark in the install path
+rem survives %~dp0 expansion (the doc flagged this CMD edge case).
+setlocal DisableDelayedExpansion
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0version-info.ps1"
+set "DSH_RC=%ERRORLEVEL%"
+endlocal & exit /b %DSH_RC%
 
 :uninstall
 echo Removing deepseek command from PATH...
@@ -166,11 +201,15 @@ echo Usage:
 echo   deepseek                start in foreground mode (default)
 echo   deepseek -b / -d        submit background startup and return immediately
 echo   deepseek --status       check service state (starting/ready/unhealthy/foreign-port/failed/stopped)
+echo   deepseek --status --json  same state as machine-readable JSON (exit code reflects findings)
 echo   deepseek --stop         stop the service
 echo   deepseek --logs [N]     show last N lines of the background log (default 20)
+echo   deepseek --logs --follow [N]  follow the log and reconnect across rotation (Ctrl+C to stop)
 echo   deepseek --version      show launcher and DeepSeek Harness versions
 echo   deepseek --update       check for a newer DeepSeek Harness version
 echo   deepseek --upgrade      stop, clear cache, restart with the latest version
+echo   deepseek --update-launcher    check for a newer launcher release on GitHub
+echo   deepseek --upgrade-launcher   download, verify and update this launcher install
 echo   deepseek --uninstall    remove this command from PATH
 echo   deepseek --uninstall --full   remove everything (PATH, install dir, logs, shortcut)
 echo   deepseek --check        check environment and exit
@@ -181,11 +220,11 @@ rem The top-level goto help path preserves the current success errorlevel.
 goto :eof
 
 :check
-echo deepseek.cmd: OK
-echo Script dir: %~dp0
-where npm >nul 2>&1 && echo npm: found || echo npm: NOT FOUND
-echo GUI address: http://127.0.0.1:3080
-exit /b 0
+rem Phase D: --check is now a real diagnosis (doctor). Its exit code reflects
+rem the findings instead of a fixed success value.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0dsh-doctor.ps1"
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
 
 rem Subroutine: map one argument token to its canonical action name.  Sets
 rem ACTION on first hit and CONFLICT when a different action token arrives.
@@ -212,10 +251,28 @@ echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--status$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=status"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--logs$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=logs"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--follow$" >nul 2>&1
+if not errorlevel 1 (
+    if /i not "%ACTION%"=="logs" set "BADARG=%CLASSIFY_TOKEN%"
+    if defined LOG_FOLLOW set "BADARG=%CLASSIFY_TOKEN%"
+    set "LOG_FOLLOW=1"
+    goto :eof
+)
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--json$" >nul 2>&1
+if not errorlevel 1 (
+    if /i not "%ACTION%"=="status" set "BADARG=%CLASSIFY_TOKEN%"
+    if defined STATUS_JSON set "BADARG=%CLASSIFY_TOKEN%"
+    set "STATUS_JSON=1"
+    goto :eof
+)
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--upgrade$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=upgrade"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--update$" /c:"^update$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=update"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--update-launcher$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=update-launcher"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--upgrade-launcher$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=upgrade-launcher"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--version$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=version"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--uninstall$" /c:"^uninstall$" >nul 2>&1

@@ -1,4 +1,4 @@
-# dsh-launcher
+﻿# dsh-launcher
 
 [中文](README.md) | [English](README.en.md)
 
@@ -103,21 +103,25 @@ cd dsh-launcher
 | `deepseek` | 前台启动（默认）：窗口显示日志，关闭窗口或 Ctrl+C 即停止 |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | 后台启动：提交后立即返回，服务继续运行并在就绪后自动打开浏览器 |
 | `deepseek --status` | 查看服务状态（`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`）；启动下载期间显示 `STARTING`，失败时提示日志路径 |
+| `deepseek --status --json` | 以版本化 JSON 输出同一状态（含时间戳与字段），问题状态（`FAILED` / `UNHEALTHY` / `FOREIGN_PORT`）以非零码退出，便于脚本消费 |
 | `deepseek --stop` | 停止服务（按端口 3080 定位进程，仅停止 DeepSeek Harness 相关进程），并提示重新启动命令；进程无法结束或等待超时会显式报错并以非零码退出 |
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
-| `deepseek --version` | 显示启动器版本与本地 DeepSeek Harness 版本 |
-| `deepseek --update` | 对比本地与 npm 上的最新版本，提示更新方法 |
+| `deepseek --logs --follow [N]` | 跟随日志输出（Ctrl+C 停止）；日志被轮转后会自动重连新文件，长期运行的后台日志超过 5MB 会轮转保留一代 `.old` |
+| `deepseek --version` | 显示启动器版本与**当前活动**的 DeepSeek Harness 版本（优先读取 `runtime-current.json` 活动指针，指针缺失时回退旧版运行时目录，并标注其他非活动来源） |
+| `deepseek --update` | 对比**活动运行时**版本与 npm 上的最新版本，提示更新方法；本地版本无法确认或远端解析失败时以非零码退出，不会把“未知”当作“已是最新” |
 | `deepseek --upgrade` | 一键升级：解析并校验目标版本；当前运行时健康且版本不低于目标版本时直接提示已是最新并退出，不停止服务也不执行 npm 操作；否则停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动；候选版本因插件依赖 DSH 已移除的导出而启动失败时，会列出不兼容插件并询问是否移除，确认后自动移除并重试；拒绝或处理失败时依次尝试恢复当前、上一版或旧版可用运行时（只有通过就绪校验的运行时才会被用于回退） |
+| `deepseek --update-launcher` | 查询 GitHub 上启动器的最新稳定发行版并与本地版本比较（只查询，不改文件） |
+| `deepseek --upgrade-launcher` | 自更新启动器：下载发行包并校验 SHA-256 与包清单 → 获取维护互斥锁 → 旧安装整目录备份 → 新版就位 → 离线烟雾验证 → 提交；服务运行中、DSH 升级进行中、源码工作树或非受管安装时拒绝执行；失败自动恢复旧版本（恢复未完成时保留备份与恢复脚本并以退出码 2 结束） |
 | `deepseek --uninstall` | 从用户 PATH 移除 `deepseek` 命令（卸载注册） |
 | `deepseek --uninstall --full` | 完整卸载：移除 PATH + 桌面快捷方式 + 日志与运行时目录 + 安装目录（带确认，取消不做任何更改；先停止服务，目录先备份后删除；PATH 在目录全部备份成功后才移除；安装目录会校验所有权标记，删除失败时保留备份并提示位置） |
-| `deepseek --check` | 环境自检（脚本路径 / npm / 端口） |
+| `deepseek --check` / `deepseek --doctor` | 环境诊断：启动器安装与版本、Node/npm、活动运行时与指针、服务状态与端口 3080 占用、最近一次失败原因；发现问题时以非零码退出 |
 | `deepseek --help` | 查看帮助 |
 
 - 普通启动优先复用已经准备并校验过的本地 DSH 版本；存在可用本地运行时时不访问 npm。仅在没有可用运行时的首次启动或修复场景中准备依赖。使用 `deepseek --update` 从 npm 检查新版本，使用 `deepseek --upgrade` 安装并切换到新版本。
 - `deepseek --update` / `deepseek --upgrade` 默认直接查询 npm 公共 registry 的 dist-tags（比 `npm view` 更快）。如需使用镜像或私有 registry，可设置环境变量 `DSH_REGISTRY`（例如 `https://registry.npmmirror.com`）；该设置仅在查询远端发布版本时生效，不影响本地运行时启动。
 - `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则升级到最新版，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。目标版本无法解析或格式非法时，升级会在停止服务之前直接中止，不会影响当前安装。
 - 如果候选版本启动日志确认某个插件依赖已经从 DSH 移除的导出，`deepseek --upgrade` 会显示插件名并询问是否从 `web` profile 移除；确认后使用目标版本的 `dsh plugin --profile web remove` 清理插件并重试候选运行时，拒绝则保留插件并回退旧运行时。
-- 每次调用只允许一个动作（`--help`、`--status`、`--stop`、`-b` 等互斥）；出现多个动作时报错退出。`--full` 只能与 `--uninstall` 组合使用，并会传给事务式完整卸载流程；数字只允许紧跟在 `--logs` 后作为唯一的行数。PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。
+- 每次调用只允许一个动作（`--help`、`--status`、`--stop`、`-b` 等互斥）；出现多个动作时报错退出。`--full` 只能与 `--uninstall` 组合使用，并会传给事务式完整卸载流程；数字只允许紧跟在 `--logs` 后作为唯一的行数，`--json` 只允许跟随 `--status`、`--follow` 只允许跟随 `--logs`。PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。
 - Node.js 版本要求为 `^22.19.0 || >=24.0.0`（与上游一致）：安装、启动和升级三处共用同一版本检查，版本过低或未安装时会给出当前版本、要求版本和升级方式后直接失败，不会进入运行时准备流程。
 
 ## 其他启动方式
@@ -136,7 +140,13 @@ cd dsh-launcher
 | `background-run.ps1` | 持有后台启动锁，记录生命周期状态与日志，并启动就绪监视器和 DSH 子进程 |
 | `background-run.cmd` | 后台 runner 的兼容入口；正常启动关键路径直接使用 `background-run.ps1` |
 | `run-dsh.ps1` | 串行准备版本化 DSH 运行时、补齐必需 peer 依赖、通过 `npm ls --all` 审计后启动 Node 入口 |
-| `update-check.ps1` | 版本对比：本地运行时 / 旧 npx 缓存 / 全局安装 vs npm 最新版 |
+| `update-check.ps1` | 版本对比：活动运行时指针 vs npm 最新版（其余来源仅作参考信息） |
+| `update-launcher.ps1` | 启动器自更新：查询 / 下载 / 校验 GitHub 发行包并事务式替换当前安装（`--update-launcher` / `--upgrade-launcher`） |
+| `dsh-doctor.ps1` | `deepseek --doctor` / `--check` 的环境诊断实现 |
+| `dsh-logs.ps1` | `deepseek --logs` 的日志查看与跟随（支持轮转重连）实现 |
+| `dsh-maintenance-lock.ps1` | 启动器维护互斥：覆盖安装、DSH 升级、自更新、完整卸载共用同一把用户级维护锁 |
+| `version-info.ps1` | `deepseek --version` 的版本来源实现（活动指针优先） |
+| `register-path.ps1` | `install-command.cmd` 的用户 PATH 注册实现 |
 | `upgrade-dsh.ps1` | 一键升级：停止服务、清理旧 DSH npx 工作区、准备并启动最新版运行时 |
 | `set-shortcut.ps1` | 创建或迁移桌面快捷方式，配置可见启动进度窗口 |
 | `uninstall.ps1` | 卸载：移除 PATH 注册（`-Full` 时同时删除快捷方式 / 日志和运行时 / 安装目录） |

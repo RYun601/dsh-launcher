@@ -102,5 +102,8 @@ if ($tags) {
         $publishedVersions += [string]$prop.Value
     }
 }
-$best = Get-HighestDshVersion $publishedVersions
+$best = $null
+if ($publishedVersions.Count -gt 0) {
+    $best = Get-HighestDshVersion $publishedVersions
+}
 if ($best) { Write-Output $best }

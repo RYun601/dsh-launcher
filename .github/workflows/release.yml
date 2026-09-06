@@ -72,11 +72,17 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $packageRoot = Join-Path $PWD 'dist/dsh-launcher'
           New-Item -ItemType Directory -Force -Path $packageRoot | Out-Null
+          # release-files.txt lists itself so self-update can validate the
+          # extracted package against the manifest it ships with.
           foreach ($file in @(Get-Content release-files.txt | Where-Object { $_ -and -not $_.StartsWith('#') })) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Release source missing: $file" }
             Copy-Item -LiteralPath $file -Destination $packageRoot
           }
           Compress-Archive -LiteralPath $packageRoot -DestinationPath (Join-Path $PWD 'dist/dsh-launcher.zip') -CompressionLevel Optimal
+          # SHA-256 sidecar for launcher self-update: the GitHub API digest field
+          # is preferred, this asset is the fallback verification material.
+          $sha256 = (Get-FileHash (Join-Path $PWD 'dist/dsh-launcher.zip') -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText((Join-Path $PWD 'dist/dsh-launcher.zip.sha256'), "$sha256  dsh-launcher.zip`n", [Text.UTF8Encoding]::new($false))
 
       - name: Smoke test extracted release archive
         shell: pwsh
@@ -88,5 +94,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
-          files: dist/dsh-launcher.zip
+          files: |
+            dist/dsh-launcher.zip
+            dist/dsh-launcher.zip.sha256
           generate_release_notes: true

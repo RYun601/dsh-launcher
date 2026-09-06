@@ -16,6 +16,7 @@ $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $dir 'dsh-version.ps1')
 . (Join-Path $dir 'dsh-node-version.ps1')
 . (Join-Path $dir 'dsh-runtime-layout.ps1')
+. (Join-Path $dir 'dsh-maintenance-lock.ps1')
 
 # 0) Node.js 版本前置检查：不满足要求时直接失败，不触碰正在运行的服务。
 if (-not (Assert-DshNodeEnvironment)) { exit 1 }
@@ -35,6 +36,14 @@ if (-not (ConvertTo-DshSemVer $targetVersion)) {
 Write-Host "目标版本：$targetVersion"
 
 $launchRoot = Join-Path $env:USERPROFILE 'dsh-launch'
+
+# 维护互斥（R9）：覆盖“准备候选—停止—重启验证—提交—清理”整个升级事务，
+# 与覆盖安装、启动器自更新、完整卸载共用同一把用户级维护锁，避免两个
+# 维护事务交错提交或互相覆盖候选。锁顺序固定：维护锁 -> 启动锁 -> 运行时互斥。
+$maintenanceMutex = Enter-DshMaintenanceLock -LaunchRoot $launchRoot
+# 事务 ID（R9）：读写、清除事务均验证所属事务，防止接管或误删其他事务的记录。
+$upgradeTransactionId = [guid]::NewGuid().ToString('N')
+try {
 $layout = Get-DshRuntimeLayout -LaunchRoot $launchRoot
 $pointer = Initialize-DshRuntimePointer -Layout $layout
 $oldRuntime = $pointer.Current
@@ -62,7 +71,8 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 Write-DshUpgradeTransaction -Layout $layout -Phase 'PREPARED' -Old $oldRuntime `
-    -Candidate $candidate -StartupToken ([guid]::NewGuid().ToString('N')) | Out-Null
+    -Candidate $candidate -StartupToken ([guid]::NewGuid().ToString('N')) `
+    -TransactionId $upgradeTransactionId | Out-Null
 
 # 2) 停止服务（stop-dsh.ps1 内含误杀防护）
 Write-Host '正在停止服务...'
@@ -72,9 +82,10 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$transaction = Read-DshUpgradeTransaction -Layout $layout
+$transaction = Read-DshUpgradeTransaction -Layout $layout -ExpectedTransactionId $upgradeTransactionId
 Write-DshUpgradeTransaction -Layout $layout -Phase 'STOPPED' -Old $transaction.Old `
-    -Candidate $transaction.Candidate -StartupToken $transaction.StartupToken | Out-Null
+    -Candidate $transaction.Candidate -StartupToken $transaction.StartupToken `
+    -TransactionId $upgradeTransactionId | Out-Null
 
 # 2) 删除完整的 DSH npx 工作区（下次启动自动下载最新版）。
 # 只删除 node_modules\@deepseek-ai\dsh 会留下 package-lock.json 和旧依赖树，
@@ -206,9 +217,10 @@ if ($LASTEXITCODE -ne 0) {
     if ($candidateExit -eq 0) {
         $committed = Commit-DshRuntimePointer -Layout $layout -Candidate $candidate
         Write-DshUpgradeTransaction -Layout $layout -Phase 'COMMITTED' -Old $committed.Previous `
-            -Candidate $committed.Current -StartupToken $transaction.StartupToken | Out-Null
+            -Candidate $committed.Current -StartupToken $transaction.StartupToken `
+            -TransactionId $upgradeTransactionId | Out-Null
         Remove-DshUnreferencedRuntimes -Layout $layout
-        Clear-DshUpgradeTransaction -Layout $layout
+        Clear-DshUpgradeTransaction -Layout $layout -ExpectedTransactionId $upgradeTransactionId
         Write-Host "升级完成，当前运行时：$($committed.Current.Version)"
         exit 0
     }
@@ -226,6 +238,7 @@ if ($LASTEXITCODE -ne 0) {
     }
 
     $restored = $false
+    $restoredOption = $null
     foreach ($option in $rollbackOptions) {
         if ($restored) { break }
         Write-Host "正在尝试恢复运行时：$($option.Version)（$($option.Path)）..."
@@ -235,20 +248,39 @@ if ($LASTEXITCODE -ne 0) {
         if ($rollbackExit -eq 0) {
             Write-Host "旧运行时已恢复：$($option.Version)"
             $restored = $true
+            $restoredOption = $option
         } else {
             Write-Host "[WARN] 恢复失败（$($option.Version)，exit $rollbackExit），尝试下一个候选。"
         }
     }
     if (-not $restored) {
         Write-Host '[ERROR] 没有可恢复的可用运行时；服务当前未运行。可稍后重新执行 deepseek 启动。'
+    } elseif ($restoredOption) {
+        # 指针一致性：恢复成功后必须同步活动指针，否则后续启动不会复用恢复版本。
+        # 这里必须传入绝对路径；Write-DshRuntimePointer 内部负责转为相对路径。
+        $pointer = [pscustomobject]@{
+            SchemaVersion = 1
+            Current = [pscustomobject]@{
+                Path = [string]$restoredOption.Path
+                Version = [string]$restoredOption.Version
+            }
+            Previous = $null
+        }
+        Write-DshRuntimePointer -Layout $layout -Pointer $pointer
+        Write-Host "活动运行时指针已同步到恢复版本：$($restoredOption.Version)"
     }
-    Clear-DshUpgradeTransaction -Layout $layout
+    Clear-DshUpgradeTransaction -Layout $layout -ExpectedTransactionId $upgradeTransactionId
     exit $candidateExit
 }
 
 $committed = Commit-DshRuntimePointer -Layout $layout -Candidate $candidate
 Write-DshUpgradeTransaction -Layout $layout -Phase 'COMMITTED' -Old $committed.Previous `
-    -Candidate $committed.Current -StartupToken $transaction.StartupToken | Out-Null
+    -Candidate $committed.Current -StartupToken $transaction.StartupToken `
+    -TransactionId $upgradeTransactionId | Out-Null
 Remove-DshUnreferencedRuntimes -Layout $layout
-Clear-DshUpgradeTransaction -Layout $layout
+Clear-DshUpgradeTransaction -Layout $layout -ExpectedTransactionId $upgradeTransactionId
 Write-Host "升级完成，当前运行时：$($committed.Current.Version)"
+exit 0
+} finally {
+    Exit-DshMaintenanceLock -Mutex $maintenanceMutex
+}

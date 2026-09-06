@@ -332,6 +332,9 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
     }
 
     Invoke-Test 'serializes concurrent users of the shared runtime' {
+        # R10 修复：以"首进程已进入受保护执行区"为信号屏障（fake node 写入
+        # 入口调用日志后才睡眠，而该调用发生在运行时互斥体内），再启动第二
+        # 个进程；固定时间只用于超时保护，失败时保存子进程诊断信息。
         [IO.File]::WriteAllText($nodeLog, '', [Text.Encoding]::ASCII)
         $processes = @()
         try {
@@ -349,16 +352,32 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
                 $startInfo.EnvironmentVariables['DSH_TEST_NODE_DELAY'] = $delay
                 $processes += [Diagnostics.Process]::Start($startInfo)
                 if ($processes.Count -eq 1) {
-                    for ($attempt = 0; $attempt -lt 30 -and @([IO.File]::ReadAllLines($nodeLog)).Count -eq 0; $attempt++) {
+                    # 信号屏障：等首进程把入口调用写入日志（此时它已持有运行时互斥）。
+                    $barrierDeadline = [DateTime]::UtcNow.AddSeconds(60)
+                    while (@([IO.File]::ReadAllLines($nodeLog)).Count -eq 0) {
+                        if ($processes[0].HasExited) {
+                            throw "First runtime process exited before the barrier: exit $($processes[0].ExitCode), stdout: $($processes[0].StandardOutput.ReadToEnd()), stderr: $($processes[0].StandardError.ReadToEnd())"
+                        }
+                        if ([DateTime]::UtcNow -ge $barrierDeadline) {
+                            throw 'Timed out waiting for the first runtime process to enter the protected execution region'
+                        }
                         Start-Sleep -Milliseconds 100
                     }
                 }
             }
 
-            Start-Sleep -Milliseconds 300
-            Assert-Equal 1 @([IO.File]::ReadAllLines($nodeLog)).Count 'Only one process may execute from the shared runtime at a time'
+            # 第二个进程此刻必然阻塞在运行时互斥上；固定时间仅用于观察窗口。
+            Start-Sleep -Milliseconds 800
+            $nodeLogLines = @([IO.File]::ReadAllLines($nodeLog))
+            if ($nodeLogLines.Count -ne 1) {
+                $diagnostics = foreach ($process in $processes) {
+                    $state = if ($process.HasExited) { "exited $($process.ExitCode)" } else { 'running' }
+                    "process[$state] stdout: $($process.StandardOutput.ReadToEnd()) stderr: $($process.StandardError.ReadToEnd())"
+                }
+                throw "Only one process may execute from the shared runtime at a time (expected: 1, actual: $($nodeLogLines.Count)). Diagnostics: $($diagnostics -join ' | ')"
+            }
             foreach ($process in $processes) {
-                Assert-Equal $true $process.WaitForExit(10000) 'Concurrent runtime test process did not finish'
+                Assert-Equal $true $process.WaitForExit(15000) 'Concurrent runtime test process did not finish'
                 Assert-Equal 0 $process.ExitCode "Serialized runtime process failed: $($process.StandardError.ReadToEnd())"
             }
         } finally {
@@ -377,6 +396,29 @@ $prefixIndex = [Array]::IndexOf($NpmArguments, '--prefix')
         $result = Invoke-UnsafeRuntime -UnsafeRoot $unsafeRoot
         Assert-Equal 1 $result.ExitCode "An unsafe runtime root should be rejected. Output:`n$($result.Output)"
         Assert-Equal $true (Test-Path -LiteralPath $sentinel) 'Rejecting an unsafe root must not delete its existing files'
+    }
+
+    Invoke-Test 'rejects a junction runtime root pointing outside the launch root' {
+        # R2 复现：受管 launch root 内的 junction 指向边界之外的已就绪夹具，
+        # 读取准备入口必须拒绝，且外部哨兵保持不变。
+        $outsideRoot = Join-Path $testRoot 'outside-junction-target'
+        New-Item -ItemType Directory -Force -Path $outsideRoot | Out-Null
+        $outsideSentinel = Join-Path $outsideRoot 'sentinel.txt'
+        Set-Content -LiteralPath $outsideSentinel -Value 'keep' -Encoding ASCII
+        New-FakeReadyRuntime -Root $outsideRoot -DshVersion '0.1.0-rc.8'
+
+        $junctionRoot = Join-Path $profileRoot 'dsh-launch\runtime-alias'
+        New-Item -ItemType Junction -Path $junctionRoot -Target $outsideRoot | Out-Null
+        try {
+            $result = Invoke-Runtime -SelectedRuntimeRoot $junctionRoot -PrepareOnly
+            Assert-Equal 1 $result.ExitCode "A junction runtime root must be rejected. Output:`n$($result.Output)"
+            Assert-Match $result.Output 'reparse point' 'The rejection must explain the physical boundary violation'
+            Assert-Equal $true (Test-Path -LiteralPath $outsideSentinel) 'The junction target must remain untouched'
+            Assert-Equal $false (Test-Path -LiteralPath (Join-Path $junctionRoot 'dsh-runtime-ready.json.new')) `
+                'A rejected junction runtime must not be modified'
+        } finally {
+            [IO.Directory]::Delete($junctionRoot)
+        }
     }
 
     Invoke-Test 'rejects unsupported Node versions before preparing the runtime' {

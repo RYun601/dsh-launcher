@@ -15,13 +15,40 @@ try {
 $ErrorActionPreference = 'Stop'
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $target = $dir.TrimEnd('\')
+$maintenanceLockHelper = Join-Path $dir 'dsh-maintenance-lock.ps1'
+if (Test-Path -LiteralPath $maintenanceLockHelper -PathType Leaf) {
+    . $maintenanceLockHelper
+}
+
+# —— 用户 PATH 存储访问 ——
+# 测试通过 DSH_TEST_UNINSTALL_PATH_STORE 注入文件存储，避免触碰真实注册表。
+function Get-DshUserPathValue {
+    $store = [string]$env:DSH_TEST_UNINSTALL_PATH_STORE
+    if ($store) {
+        if (Test-Path -LiteralPath $store -PathType Leaf) {
+            return [IO.File]::ReadAllText($store)
+        }
+        return ''
+    }
+    return [Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
+function Set-DshUserPathValue {
+    param([string]$Value)
+    $store = [string]$env:DSH_TEST_UNINSTALL_PATH_STORE
+    if ($store) {
+        [IO.File]::WriteAllText($store, $Value, [Text.UTF8Encoding]::new($false))
+        return
+    }
+    [Environment]::SetEnvironmentVariable('Path', $Value, 'User')
+}
 
 # 普通卸载只注销用户 PATH；完整卸载的事务在确认通过、目录全部备份成功后才改 PATH。
 if (-not $Full) {
-    $p = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $p = Get-DshUserPathValue
     if ($p) {
         $parts = @($p -split ';' | Where-Object { $_ -ne '' -and $_.TrimEnd('\') -ne $target })
-        [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+        Set-DshUserPathValue -Value ($parts -join ';')
         Write-Host "已从用户 PATH 移除：$dir"
         Write-Host '新开的终端中 deepseek 命令将不再可用（当前已打开的终端不受影响）。'
     } else {
@@ -110,18 +137,89 @@ if (Test-Path -LiteralPath $ownerMarkerPath) {
     }
 }
 
-$desktop = [Environment]::GetFolderPath('Desktop')
+# 桌面定位：GetFolderPath 不受 USERPROFILE 影响；测试通过
+# DSH_TEST_UNINSTALL_DESKTOP 注入假桌面，且只接受位于用户目录边界内的注入值。
+$desktop = $null
+$desktopOverride = [string]$env:DSH_TEST_UNINSTALL_DESKTOP
+if (-not [string]::IsNullOrWhiteSpace($desktopOverride)) {
+    try {
+        $desktopCandidate = [IO.Path]::GetFullPath($desktopOverride).TrimEnd('\')
+        if ($desktopCandidate.StartsWith($profileFull + '\', [StringComparison]::OrdinalIgnoreCase) -and
+                (Test-Path -LiteralPath $desktopCandidate -PathType Container)) {
+            $desktop = $desktopCandidate
+        }
+    } catch { }
+}
+if (-not $desktop) {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+}
 if ([string]::IsNullOrWhiteSpace($desktop)) {
     $desktop = Join-Path $profileFull 'Desktop'
 }
 $lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
 
+# 快捷方式归属核对（R6）：只有指向本安装的受管快捷方式才允许进入删除事务；
+# 同名但指向其他安装/程序的快捷方式、以及同名普通文件都必须保留。
+$managedShortcutDescription = 'DeepSeek Harness (background mode)'
+function Test-DshOwnedDesktopShortcut {
+    param([string]$ShortcutPath, [string]$InstallDirFull)
+
+    if (-not (Test-Path -LiteralPath $ShortcutPath -PathType Leaf)) { return $false }
+    if (-not [string]::Equals([IO.Path]::GetExtension($ShortcutPath), '.lnk', [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $targetPath = [string]$shortcut.TargetPath
+        $arguments = [string]$shortcut.Arguments
+        $workingDirectory = [string]$shortcut.WorkingDirectory
+        $description = [string]$shortcut.Description
+    } catch {
+        return $false
+    }
+    $managedWrapper = Join-Path $InstallDirFull 'start-background.cmd'
+    $pointsAtThisInstall = $false
+    if ($targetPath) {
+        try {
+            $normalizedTarget = [IO.Path]::GetFullPath($targetPath).TrimEnd('\')
+            if ([string]::Equals($normalizedTarget, $InstallDirFull, [StringComparison]::OrdinalIgnoreCase)) {
+                $pointsAtThisInstall = $true
+            }
+        } catch { }
+    }
+    if (-not $pointsAtThisInstall -and $arguments -and $arguments.IndexOf($managedWrapper, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $pointsAtThisInstall = $true
+    }
+    if (-not $pointsAtThisInstall) { return $false }
+    if ($description -eq $managedShortcutDescription) { return $true }
+    if ($workingDirectory) {
+        try {
+            $normalizedWorkingDirectory = [IO.Path]::GetFullPath($workingDirectory).TrimEnd('\')
+            if ([string]::Equals($normalizedWorkingDirectory, $InstallDirFull, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        } catch { }
+    }
+    return $false
+}
+$shortcutIsOwned = Test-DshOwnedDesktopShortcut -ShortcutPath $lnkPath -InstallDirFull $dirFull
+
 # —— 备份后删除：先移入唯一备份区，最后一步才真正删除；任一搬移失败整体回滚 ——
+# 维护互斥（AGENTS 不变量 11）：完整卸载属于维护事务，必须与覆盖安装、
+# DSH 升级、启动器自更新串行化，避免并发替换/删除同一安装目录。
+$script:uninstallMaintenanceMutex = $null
+if (Get-Command Enter-DshMaintenanceLock -ErrorAction SilentlyContinue) {
+    $script:uninstallMaintenanceMutex = Enter-DshMaintenanceLock
+}
 $backupRoot = Join-Path $env:TEMP ('dsh-launcher-backup-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+try {
 
-# 搬移日志：记录备份区相对名 -> 原始绝对路径，供失败时逆序恢复。
+# 搬移日志：同时记录备份区实际路径与原始绝对路径（R3），
+# 供失败时逐项逆序恢复并验证。
 $movedOriginals = [ordered]@{}
+$movedBackups = [ordered]@{}
 
 # 移动目录或文件到备份区（带重试，等待文件锁释放）。
 function Move-ToBackup {
@@ -146,14 +244,57 @@ function Move-IntoTransaction {
     if (Test-Path -LiteralPath $Source) {
         if (-not (Move-ToBackup $Source $Destination)) { throw $FailureMessage }
         $script:movedOriginals[$Key] = $Source
+        $script:movedBackups[$Key] = $Destination
         Write-Host "已移入备份区：$Source"
     }
 }
 
+# 逐项恢复并验证（R3）：只有每个已搬移条目都回到原位才算回滚成功；
+# 任何失败都保留剩余备份，绝不递归删除唯一恢复副本。
+function Restore-TransactionMoves {
+    $allRestored = $true
+    $names = @($movedOriginals.Keys)
+    [array]::Reverse($names)
+    foreach ($name in $names) {
+        $backupPath = [string]$movedBackups[$name]
+        $originalPath = [string]$movedOriginals[$name]
+        if ($env:DSH_TEST_UNINSTALL_FAIL_RESTORE -eq $name) {
+            Write-Host "[WARN] 测试注入的恢复失败：$name"
+            $allRestored = $false
+            continue
+        }
+        if (Test-Path -LiteralPath $originalPath) {
+            # 原位已存在内容：把备份移回去会嵌套覆盖，视为恢复冲突。
+            Write-Host "[WARN] 恢复冲突，原位已存在：$originalPath"
+            $allRestored = $false
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $backupPath)) {
+            Write-Host "[WARN] 备份缺失，无法恢复：$originalPath"
+            $allRestored = $false
+            continue
+        }
+        if (-not (Move-ToBackup -Source $backupPath -Destination $originalPath)) {
+            Write-Host "[WARN] 恢复失败（可能仍被占用）：$originalPath"
+            $allRestored = $false
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $originalPath)) {
+            Write-Host "[WARN] 恢复后未找到：$originalPath"
+            $allRestored = $false
+        }
+    }
+    return $allRestored
+}
+
 try {
-    Move-IntoTransaction -Key 'shortcut' -Source $lnkPath `
-        -Destination (Join-Path $backupRoot 'DeepSeek Harness.lnk') `
-        -FailureMessage "快捷方式无法移入备份区：$lnkPath"
+    if ($shortcutIsOwned) {
+        Move-IntoTransaction -Key 'shortcut' -Source $lnkPath `
+            -Destination (Join-Path $backupRoot 'DeepSeek Harness.lnk') `
+            -FailureMessage "快捷方式无法移入备份区：$lnkPath"
+    } elseif (Test-Path -LiteralPath $lnkPath) {
+        Write-Host "检测到非本安装管理的同名快捷方式，已保留：$lnkPath"
+    }
     Move-IntoTransaction -Key 'dsh-launch' -Source $logDirFull `
         -Destination (Join-Path $backupRoot 'dsh-launch') `
         -FailureMessage "日志目录无法移入备份区（可能仍被占用）：$logDirFull"
@@ -161,40 +302,37 @@ try {
         -Destination (Join-Path $backupRoot 'install') `
         -FailureMessage "安装目录无法移入备份区（可能仍被占用）：$dirFull"
 } catch {
-    $names = @($movedOriginals.Keys)
-    [array]::Reverse($names)
-    foreach ($name in $names) {
-        $dest = Join-Path $backupRoot $name
-        if (Test-Path -LiteralPath $dest) {
-            Move-ToBackup $dest $movedOriginals[$name] | Out-Null
-        }
+    if (Restore-TransactionMoves) {
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[ERROR] 完整卸载失败并已回滚（uninstall aborted）：$($_.Exception.Message)"
+    } else {
+        Write-Host "[ERROR] 完整卸载失败，且未能完全恢复原状：$($_.Exception.Message)"
+        Write-Host "[WARN] 剩余备份已保留（backup kept at）：$backupRoot"
+        Write-Host '请根据备份区内容手动恢复未还原的项目。'
     }
-    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "[ERROR] 完整卸载失败并已回滚（uninstall aborted）：$($_.Exception.Message)"
     exit 1
 }
 
 # 全部搬移成功后才提交：现在开始改动用户 PATH；写 PATH 失败则连目录一起恢复。
 try {
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if ($env:DSH_TEST_UNINSTALL_FAIL_PATH -eq '1') { throw 'Injected PATH commit failure' }
+    $userPath = Get-DshUserPathValue
     if ($userPath) {
         $parts = @($userPath -split ';' | Where-Object { $_ -ne '' -and $_.TrimEnd('\') -ne $target })
-        [Environment]::SetEnvironmentVariable('Path', ($parts -join ';'), 'User')
+        Set-DshUserPathValue -Value ($parts -join ';')
         Write-Host "已从用户 PATH 移除：$dir"
     } else {
         Write-Host '用户 PATH 为空，无需清理。'
     }
 } catch {
-    $names = @($movedOriginals.Keys)
-    [array]::Reverse($names)
-    foreach ($name in $names) {
-        $dest = Join-Path $backupRoot $name
-        if (Test-Path -LiteralPath $dest) {
-            Move-ToBackup $dest $movedOriginals[$name] | Out-Null
-        }
+    if (Restore-TransactionMoves) {
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "[ERROR] 更新用户 PATH 失败，完整卸载未提交并已回滚（uninstall aborted）：$($_.Exception.Message)"
+    } else {
+        Write-Host "[ERROR] 更新用户 PATH 失败，且未能完全恢复原状：$($_.Exception.Message)"
+        Write-Host "[WARN] 剩余备份已保留（backup kept at）：$backupRoot"
+        Write-Host '请根据备份区内容手动恢复未还原的项目。'
     }
-    Remove-Item -LiteralPath $backupRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "[ERROR] 更新用户 PATH 失败，完整卸载未提交并已回滚（uninstall aborted）：$($_.Exception.Message)"
     exit 1
 }
 
@@ -208,9 +346,12 @@ if ($env:DSH_TEST_UNINSTALL_DELETE_BACKUP_FAIL -eq '1') {
         $deleteFailed = $true
     }
 }
-if ($deleteFailed) {
-    Write-Host "[WARN] 备份区未能删除，数据保留在（backup kept at）：$backupRoot"
-    Write-Host '确认服务已退出后，可手动删除该备份目录。'
-} else {
-    Write-Host '备份区已清理，完整卸载完成。'
+    if ($deleteFailed) {
+        Write-Host "[WARN] 备份区未能删除，数据保留在（backup kept at）：$backupRoot"
+        Write-Host '确认服务已退出后，可手动删除该备份目录。'
+    } else {
+        Write-Host '备份区已清理，完整卸载完成。'
+    }
+} finally {
+    Exit-DshMaintenanceLock -Mutex $script:uninstallMaintenanceMutex
 }

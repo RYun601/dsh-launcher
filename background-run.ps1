@@ -59,9 +59,30 @@ function Add-RunnerLogLines {
     foreach ($line in @($Lines)) {
         if ($null -ne $line) {
             Add-Content -LiteralPath $log -Encoding UTF8 -Value ([string]$line)
+            $script:runnerLogAppends++
         }
     }
+    if ($script:runnerLogAppends -ge 200) {
+        $script:runnerLogAppends = 0
+        Limit-RunnerLogSize
+    }
 }
+
+function Limit-RunnerLogSize {
+    # 日志轮转（阶段 D）：长期运行时限制日志增长；超过 5MB 保留一代为 .old。
+    try {
+        if (Test-Path -LiteralPath $log -PathType Leaf) {
+            if ((Get-Item -LiteralPath $log).Length -gt 5MB) {
+                Move-Item -LiteralPath $log -Destination "$log.old" -Force -ErrorAction Stop
+            }
+        }
+    } catch {
+        # 轮转失败不影响运行中的服务；下一轮再试。
+    }
+}
+
+$script:runnerLogAppends = 0
+Limit-RunnerLogSize
 
 function Set-RunnerStartupStage {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)

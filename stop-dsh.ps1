@@ -19,9 +19,58 @@ try {
 $ErrorActionPreference = 'Stop'
 if (-not $LaunchRoot) { $LaunchRoot = Join-Path $env:USERPROFILE 'dsh-launch' }
 $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
+$healthHelper = Join-Path $PSScriptRoot 'dsh-service-health.ps1'
+. $healthHelper
 $stopped = @()
 # 已尝试结束但未成功的 PID：既用于避免重复 taskkill，也用于最终失败诊断。
 $killedFailures = @()
+
+# 停止授权必须来自结构化命令行证据：Node 入口（DSH bin.js 独立路径参数）或
+# PowerShell -File 指向的启动链脚本。普通参数、日志文件名提到脚本名不授予停止权限。
+function Test-DshLauncherCommandLine {
+    param([string]$CommandLine, [string]$ExecutablePath)
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    $arguments = @(ConvertFrom-DshWindowsCommandLine -CommandLine $CommandLine)
+    if ($arguments.Count -eq 0) { return $false }
+
+    $normalizedImage = ''
+    if (-not [string]::IsNullOrWhiteSpace($ExecutablePath)) {
+        try { $normalizedImage = [IO.Path]::GetFullPath($ExecutablePath) } catch { $normalizedImage = '' }
+    }
+    if (-not $normalizedImage) {
+        $firstToken = [string]$arguments[0]
+        if ([IO.Path]::IsPathRooted($firstToken)) {
+            try { $normalizedImage = [IO.Path]::GetFullPath($firstToken) } catch { $normalizedImage = $firstToken }
+        } else {
+            $normalizedImage = $firstToken
+        }
+    }
+    $imageLeaf = if ($normalizedImage) { [IO.Path]::GetFileName($normalizedImage) } else { '' }
+
+    if ($imageLeaf -match '^(?i:node(?:\.exe)?)$') {
+        for ($index = 1; $index -lt $arguments.Count; $index++) {
+            $argument = [string]$arguments[$index]
+            if (-not [IO.Path]::IsPathRooted($argument)) { continue }
+            try { $full = [IO.Path]::GetFullPath($argument) } catch { continue }
+            if ($full -match '(?i)[\\/]@deepseek-ai[\\/]dsh[\\/]lib[\\/]bin\.js$') { return $true }
+        }
+        return $false
+    }
+
+    if ($imageLeaf -match '^(?i:powershell(?:\.exe)?|pwsh(?:\.exe)?)$') {
+        for ($index = 1; $index -lt $arguments.Count - 1; $index++) {
+            if ([string]$arguments[$index] -notmatch '^(?i:-file)$') { continue }
+            $target = [string]$arguments[$index + 1]
+            if (-not [IO.Path]::IsPathRooted($target)) { continue }
+            try { $full = [IO.Path]::GetFullPath($target) } catch { continue }
+            if ($full -match '(?i)[\\/](?:background-run|run-dsh|start-foreground)\.ps1$') { return $true }
+        }
+        return $false
+    }
+
+    return $false
+}
 
 function Get-DshLauncherProcessState {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
@@ -32,8 +81,8 @@ function Get-DshLauncherProcessState {
         return 'UNKNOWN'
     }
     if (-not $process) { return 'GONE' }
-    $commandLine = [string]$process.CommandLine
-    if ($commandLine -match '(?i)(background-run\.(?:cmd|ps1)|run-dsh\.ps1|@deepseek-ai[\\/]dsh|[\\/]dsh[\\/]lib[\\/]bin\.js)') {
+    if (Test-DshLauncherCommandLine -CommandLine ([string]$process.CommandLine) `
+            -ExecutablePath ([string]$process.ExecutablePath)) {
         return 'ALIVE'
     }
     return 'OTHER'
