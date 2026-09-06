@@ -199,7 +199,7 @@ exit /b %DSH_RC%
 :help
 echo Usage:
 echo   deepseek                start in foreground mode (default)
-echo   deepseek -b / -d        submit background startup and return immediately
+echo   deepseek -b             submit background startup and return immediately
 echo   deepseek --status       check service state (starting/ready/unhealthy/foreign-port/failed/stopped)
 echo   deepseek --status --json  same state as machine-readable JSON (exit code reflects findings)
 echo   deepseek --stop         stop the service
@@ -243,7 +243,7 @@ if not errorlevel 1 (
     set "LOG_COUNT=%CLASSIFY_TOKEN%"
     goto :eof
 )
-echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--background$" /c:"^-b$" /c:"^--bg$" /c:"^--daemon$" /c:"^-d$" >nul 2>&1
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^-b$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=background"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--stop$" /c:"^stop$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=stop"
