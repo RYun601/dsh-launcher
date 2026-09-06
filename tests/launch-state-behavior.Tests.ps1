@@ -1,4 +1,4 @@
-param([string]$TestFilter = $env:DSH_TEST_FILTER)
+﻿param([string]$TestFilter = $env:DSH_TEST_FILTER)
 
 $ErrorActionPreference = 'Stop'
 
@@ -153,7 +153,10 @@ function Get-CimInstance {
             $marker,
             $marker + [Environment]::NewLine + [Environment]::NewLine + $ownerQueryStub
         )
-        [IO.File]::WriteAllText($helperPath, $helperContents, [Text.UTF8Encoding]::new($false))
+        # Preserve the source file's UTF-8 BOM: the helper contains Chinese
+        # comments and PS 5.1 decodes BOM-less copies with the ANSI code page,
+        # where multi-byte tails can swallow a newline and corrupt the script.
+        [IO.File]::WriteAllText($helperPath, $helperContents, [Text.UTF8Encoding]::new($true))
     }
     $tracePath = Join-Path $fixtureRoot 'classifier-trace.txt'
     $healthPath = Join-Path $fixtureRoot 'dsh-service-health.ps1'
@@ -1810,6 +1813,38 @@ try {
         Assert-Match $status.Output 'FAILED' 'Early DSH exit must remain visible in status output'
         Assert-Match $status.Output 'DSH exited before readiness' 'Status should include the recorded failure reason'
         Assert-Match $status.Output ([regex]::Escape((Join-Path $launchRoot 'dsh-background.log'))) 'Status should identify the background log'
+    }
+
+    Invoke-Test 'status JSON exposes a versioned schema with stable fields and exit codes' {
+        # 阶段 D：--status --json 提供版本化 schema；FAILED 等问题状态必须以
+        # 非零退出码呈现，且不得包含启动令牌。
+        $jsonRoot = Join-Path $testRoot 'status-json-failed'
+        $null = Invoke-StateHelper -Arguments @(
+            '-Action', 'WriteStartupState', '-LaunchRoot', $jsonRoot,
+            '-State', 'FAILED', '-OwnerPid', $PID, '-ExitCode', 3,
+            '-Message', 'DSH exited before readiness', '-Version', '0.1.0-rc.8',
+            '-StartupToken', '99999999999999999999999999999999',
+            '-RuntimeRoot', $runtimeRoot, '-Entrypoint', $entrypoint
+        )
+        $failed = Invoke-StateHelper -Arguments @(
+            '-Action', 'GetStatusJson', '-LaunchRoot', $jsonRoot
+        )
+        Assert-Equal 1 $failed.ExitCode 'A FAILED state must exit nonzero in JSON mode'
+        $failedJson = $failed.Output | ConvertFrom-Json
+        Assert-Equal 1 $failedJson.SchemaVersion 'The status JSON schema must be versioned'
+        Assert-Equal 'FAILED' $failedJson.State 'The JSON state must mirror the text state'
+        Assert-Equal 3 $failedJson.ExitCode 'The JSON exit code field must retain the recorded value'
+        Assert-Match $failedJson.GeneratedAt '^\d{4}-' 'The JSON result must carry a timestamp'
+        Assert-NotMatch $failed.Output '99999999999999999999999999999999' 'The startup token must never leak into the status JSON'
+
+        $emptyRoot = Join-Path $testRoot 'status-json-stopped'
+        $stopped = Invoke-StateHelper -Arguments @(
+            '-Action', 'GetStatusJson', '-LaunchRoot', $emptyRoot
+        )
+        Assert-Equal 0 $stopped.ExitCode 'A STOPPED state must exit zero in JSON mode'
+        $stoppedJson = $stopped.Output | ConvertFrom-Json
+        Assert-Equal 'STOPPED' $stoppedJson.State 'A clean install must report STOPPED'
+        Assert-Equal 3080 $stoppedJson.Port 'The JSON result must carry the probed port'
     }
 
     Invoke-Test 'records an early runner exit as FAILED but preserves a completed READY state' {

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [ValidateSet(
         'ClearDshNpxWorkspaces',
@@ -9,7 +9,8 @@ param(
         'RecordStartupExit',
         'GetStartupState',
         'GetStartupSnapshot',
-        'GetStatus'
+        'GetStatus',
+        'GetStatusJson'
     )]
     [string]$Action,
 
@@ -696,33 +697,115 @@ function Invoke-StatusAfterProbeTestHook {
     }
 }
 
-function Write-StatusWithoutProbe {
+function New-DshStatusResult {
+    # Shared status result object: text (--status) and JSON (--status --json)
+    # are rendered from the same decision product so they can never drift.
+    # ASCII-only comments: test harnesses may rewrite this file without a BOM,
+    # and PS 5.1 then decodes it with the ANSI code page.
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [AllowEmptyString()][string]$Message = '',
+        [int]$ServicePid = 0,
+        [AllowNull()]$Snapshot,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [int]$Port = 3080
+    )
+
+    $startupState = $null
+    $runnerPid = 0
+    $lockIsLive = $false
+    $lockOwnerStatus = 'MISSING'
+    if ($Snapshot) {
+        $startupState = $Snapshot.StartupState
+        $runnerPid = [int]$Snapshot.RunnerPid
+        $lockIsLive = [bool]$Snapshot.LockIsLive
+        $lockOwnerStatus = [string]$Snapshot.LockOwnerStatus
+    }
+    return [pscustomobject][ordered]@{
+        SchemaVersion = 1
+        State = $State
+        Message = $Message
+        ServicePid = $ServicePid
+        RunnerPid = $runnerPid
+        Version = if ($startupState -and $startupState.Version) { [string]$startupState.Version } else { '' }
+        RuntimeRoot = if ($startupState -and $startupState.RuntimeRoot) { [string]$startupState.RuntimeRoot } else { '' }
+        Entrypoint = if ($startupState -and $startupState.Entrypoint) { [string]$startupState.Entrypoint } else { '' }
+        StartedAt = if ($startupState -and $startupState.StartedAt) { [string]$startupState.StartedAt } else { '' }
+        UpdatedAt = if ($startupState -and $startupState.UpdatedAt) { [string]$startupState.UpdatedAt } else { '' }
+        ExitCode = if ($startupState -and $startupState.ExitCode) { [int]$startupState.ExitCode } else { 0 }
+        HasExitCode = [bool]($startupState -and $startupState.PSObject.Properties['ExitCode'])
+        LogPath = $LogPath
+        Port = $Port
+        LockIsLive = $lockIsLive
+        LockOwnerStatus = $lockOwnerStatus
+    }
+}
+
+function Get-StatusWithoutProbeResult {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Paths,
-        [Parameter(Mandatory = $true)][pscustomobject]$Snapshot
+        [Parameter(Mandatory = $true)][pscustomobject]$Snapshot,
+        [int]$Port = 3080
     )
 
     $startupState = $Snapshot.StartupState
     if ($Snapshot.LockIsLive) {
-        $owner = $Snapshot.Lock.OwnerPid
-        $versionSuffix = if ((Test-StatusLockMatchesState -Snapshot $Snapshot) -and $startupState.Version) {
-            " - version $($startupState.Version)"
+        # The verified live lock owner is the reported identity; a stale state
+        # file must not override the PID the lock itself vouches for.
+        $reportedVersion = if ((Test-StatusLockMatchesState -Snapshot $Snapshot) -and $startupState.Version) {
+            [string]$startupState.Version
         } else {
             ''
         }
-        Write-Output "STARTING - PID $owner$versionSuffix"
-        return
+        return (New-DshStatusResult -State 'STARTING' -Snapshot $Snapshot `
+            -LogPath $Paths.Log -Port $Port) | ForEach-Object {
+            $_.RunnerPid = [int]$Snapshot.Lock.OwnerPid
+            $_.Version = $reportedVersion
+            $_
+        }
     }
 
     if ($startupState -and $startupState.State -eq 'FAILED') {
         $reason = if ($startupState.Message) { [string]$startupState.Message } else { 'DeepSeek Harness exited before readiness' }
-        $exitSuffix = if ($null -ne $startupState.ExitCode) { " (exit code $($startupState.ExitCode))" } else { '' }
-        Write-Output "FAILED$exitSuffix - $reason"
-        Write-Output "Log: $($Paths.Log)"
-        return
+        return (New-DshStatusResult -State 'FAILED' -Message $reason `
+            -Snapshot $Snapshot -LogPath $Paths.Log -Port $Port)
     }
 
-    Write-Output 'STOPPED'
+    return (New-DshStatusResult -State 'STOPPED' -Snapshot $Snapshot -LogPath $Paths.Log -Port $Port)
+}
+
+function Write-DshStatusResult {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Result,
+        [switch]$AsJson
+    )
+
+    if ($AsJson) {
+        $Result | Add-Member -NotePropertyName GeneratedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+        $script:LastDshStatusResult = $Result
+        Write-Output ($Result | ConvertTo-Json -Depth 3 -Compress)
+        return
+    }
+    switch ($Result.State) {
+        'STARTING' {
+            $versionSuffix = if ($Result.Version) { " - version $($Result.Version)" } else { '' }
+            Write-Output "STARTING - PID $($Result.RunnerPid)$versionSuffix"
+        }
+        'FAILED' {
+            $reason = if ($Result.Message) { $Result.Message } else { 'DeepSeek Harness exited before readiness' }
+            $exitSuffix = if ($Result.HasExitCode) { " (exit code $($Result.ExitCode))" } else { '' }
+            Write-Output "FAILED$exitSuffix - $reason"
+            Write-Output "Log: $($Result.LogPath)"
+        }
+        'STOPPED' {
+            Write-Output 'STOPPED'
+        }
+        default {
+            $pidSuffix = if ($Result.ServicePid) { " - PID $($Result.ServicePid)" } else { '' }
+            $messageSuffix = if ($Result.Message) { " ($($Result.Message))" } else { '' }
+            Write-Output "$($Result.State)$pidSuffix$messageSuffix"
+        }
+    }
 }
 
 function Invoke-StatusProbe {
@@ -758,7 +841,8 @@ function Invoke-StatusProbe {
 function Write-Status {
     param(
         [Parameter(Mandatory = $true)][pscustomobject]$Paths,
-        [int]$ServicePort = 3080
+        [int]$ServicePort = 3080,
+        [switch]$AsJson
     )
 
     # 会话探测策略：READY 状态走一次性分类（CLASSIFY）；带有缓存版本记录的
@@ -827,13 +911,18 @@ function Write-Status {
             $applyRunnerPid = $applySnapshot.RunnerPid
             if ($applyState -and $applyState.State -eq 'READY' -and
                     (-not $applyState.ServicePid -or [int]$applyState.ServicePid -le 0)) {
-                Write-Output 'UNHEALTHY (stored READY state has no service PID evidence)'
+                Write-DshStatusResult -Result (New-DshStatusResult -State 'UNHEALTHY' `
+                    -Message 'stored READY state has no service PID evidence' `
+                    -Snapshot $applySnapshot -LogPath $Paths.Log -Port $ServicePort) -AsJson:$AsJson
                 return
             }
             if ($applyClassification -and $applyState -and $applyState.State -eq 'READY' -and
                     $applyClassification.State -eq 'READY' -and
                     [int]$applyClassification.ServicePid -ne [int]$applyState.ServicePid) {
-                Write-Output "UNHEALTHY - PID $($applyClassification.ServicePid) (service identity changed)"
+                Write-DshStatusResult -Result (New-DshStatusResult -State 'UNHEALTHY' `
+                    -Message 'service identity changed' `
+                    -ServicePid ([int]$applyClassification.ServicePid) `
+                    -Snapshot $applySnapshot -LogPath $Paths.Log -Port $ServicePort) -AsJson:$AsJson
                 return
             }
             if ($applyClassification -and $applyClassification.State -eq 'READY') {
@@ -849,18 +938,22 @@ function Write-Status {
                         -NewRuntimeRoot ([string]$applyState.RuntimeRoot) `
                         -NewEntrypoint ([string]$applyState.Entrypoint)
                 }
-                Write-Output "READY - PID $($applyClassification.ServicePid)"
+                Write-DshStatusResult -Result (New-DshStatusResult -State 'READY' `
+                    -ServicePid ([int]$applyClassification.ServicePid) `
+                    -Snapshot $applySnapshot -LogPath $Paths.Log -Port $ServicePort) -AsJson:$AsJson
                 return
             }
             if ($applyClassification -and
                     ($applyState -and $applyState.State -eq 'READY' -or $applyClassification.State -in @('FOREIGN_PORT', 'UNHEALTHY'))) {
-                $pidSuffix = if ($applyClassification.ServicePid) { " - PID $($applyClassification.ServicePid)" } else { '' }
-                $messageSuffix = if ($applyClassification.Message) { " ($($applyClassification.Message))" } else { '' }
-                Write-Output "$($applyClassification.State)$pidSuffix$messageSuffix"
+                Write-DshStatusResult -Result (New-DshStatusResult -State ([string]$applyClassification.State) `
+                    -Message ([string]$applyClassification.Message) `
+                    -ServicePid ([int]$applyClassification.ServicePid) `
+                    -Snapshot $applySnapshot -LogPath $Paths.Log -Port $ServicePort) -AsJson:$AsJson
                 return
             }
 
-            Write-StatusWithoutProbe -Paths $Paths -Snapshot $applySnapshot
+            Write-DshStatusResult -Result (Get-StatusWithoutProbeResult -Paths $Paths `
+                -Snapshot $applySnapshot -Port $ServicePort) -AsJson:$AsJson
             return
         } finally {
             Exit-StartupLockGuard -Guard $guard
@@ -869,7 +962,8 @@ function Write-Status {
 
     $guard = Enter-StartupLockGuard -Paths $Paths
     try {
-        Write-StatusWithoutProbe -Paths $Paths -Snapshot (Get-StartupStatusSnapshot -Paths $Paths)
+        Write-DshStatusResult -Result (Get-StatusWithoutProbeResult -Paths $Paths `
+            -Snapshot (Get-StartupStatusSnapshot -Paths $Paths) -Port $ServicePort) -AsJson:$AsJson
     } finally {
         Exit-StartupLockGuard -Guard $guard
     }
@@ -1036,5 +1130,15 @@ switch ($Action) {
     'GetStatus' {
         $paths = Get-StartupPaths -Root (Get-LaunchRoot)
         Write-Status -Paths $paths -ServicePort $Port
+    }
+
+    'GetStatusJson' {
+        $paths = Get-StartupPaths -Root (Get-LaunchRoot)
+        Write-Status -Paths $paths -ServicePort $Port -AsJson
+        $result = $script:LastDshStatusResult
+        if ($result -and $result.State -in @('FAILED', 'UNHEALTHY', 'FOREIGN_PORT')) {
+            exit 1
+        }
+        exit 0
     }
 }

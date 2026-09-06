@@ -85,6 +85,107 @@ function Test-DshPathHasReparsePoint {
     }
 }
 
+# Embedded copy of dsh-maintenance-lock.ps1 (identical mutex name derivation) so
+# the one-shot irm|iex installer participates in the same launcher maintenance
+# mutex as upgrades, self-updates and uninstalls. Keep in sync with that file.
+function Get-DshInstallMaintenanceMutexName {
+    param([string]$ProfileRoot)
+
+    $launchRoot = [IO.Path]::GetFullPath((Join-Path $ProfileRoot 'dsh-launch'))
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($launchRoot.ToUpperInvariant())
+        $hash = $sha256.ComputeHash($bytes)
+        $suffix = -join @($hash[0..11] | ForEach-Object { $_.ToString('x2') })
+        return 'Local\DshLauncherMaintenance-' + $suffix
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+function Enter-DshInstallMaintenanceLock {
+    param([string]$ProfileRoot)
+
+    $timeoutMilliseconds = 900000
+    if ($env:DSH_TEST_MAINTENANCE_TIMEOUT_MS) {
+        $timeoutMilliseconds = [int]$env:DSH_TEST_MAINTENANCE_TIMEOUT_MS
+    }
+    $mutex = [Threading.Mutex]::new($false, (Get-DshInstallMaintenanceMutexName -ProfileRoot $ProfileRoot))
+    $owned = $false
+    try {
+        $owned = $mutex.WaitOne([TimeSpan]::FromMilliseconds($timeoutMilliseconds))
+    } catch [Threading.AbandonedMutexException] {
+        $owned = $true
+    }
+    if (-not $owned) {
+        $mutex.Dispose()
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u7b49\u5f85\u542f\u52a8\u5668\u7ef4\u62a4\u9501\u8d85\u65f6\uff0c\u53ef\u80fd\u6709\u5b89\u88c5\u3001\u5347\u7ea7\u6216\u81ea\u66f4\u65b0\u6b63\u5728\u8fdb\u884c')
+    }
+    return $mutex
+}
+
+function Exit-DshInstallMaintenanceLock {
+    param($Mutex)
+
+    if ($Mutex) {
+        try { $Mutex.ReleaseMutex() } catch { }
+        $Mutex.Dispose()
+    }
+}
+
+function Move-DshDirectoryWithRetry {
+    param([string]$Source, [string]$Destination)
+
+    for ($attempt = 0; $attempt -lt 30; $attempt++) {
+        try {
+            Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+            return $true
+        } catch [IO.IOException] {
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    return $false
+}
+
+function Assert-DshPayloadPackage {
+    param([string]$PayloadRoot)
+
+    # Package validation must complete before any payload script is executed
+    # (R5): manifest entry files, launcher version, PS 5.1 parseability and the
+    # installer BOM guard are all checked against the extracted payload.
+    $versionFile = Join-Path $PayloadRoot 'VERSION'
+    if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11 VERSION \u6587\u4ef6')
+    }
+    $packageVersion = ([string](Get-Content -LiteralPath $versionFile -Raw)).Trim()
+    if ($packageVersion -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305 VERSION \u4e0d\u662f\u6709\u6548\u7248\u672c\u53f7')
+    }
+    foreach ($requiredFile in @('deepseek.cmd', 'dsh-node-version.ps1')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PayloadRoot $requiredFile) -PathType Leaf)) {
+            $message = '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11\u5fc5\u9700\u6587\u4ef6 ' + $requiredFile
+            throw (ConvertFrom-DshUnicodeText $message)
+        }
+    }
+    foreach ($payloadScript in @(Get-ChildItem -LiteralPath $PayloadRoot -Filter '*.ps1' -File -Recurse)) {
+        $tokens = $null
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile(
+            $payloadScript.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+        if ($errors.Count -gt 0) {
+            throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5185\u811a\u672c\u65e0\u6cd5\u88ab Windows PowerShell 5.1 \u89e3\u6790') + ': ' + $payloadScript.Name
+        }
+    }
+    $payloadInstaller = Join-Path $PayloadRoot 'install.ps1'
+    if (Test-Path -LiteralPath $payloadInstaller -PathType Leaf) {
+        $bytes = [IO.File]::ReadAllBytes($payloadInstaller)
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5185 install.ps1 \u5e26\u6709 UTF-8 BOM')
+        }
+    }
+    return $packageVersion
+}
+
 # Keep this defense for BOM-prefixed irm | iex input in Windows PowerShell 5.1.
 if ($InstallDir -isnot [string] -or $InstallDir -match '(False|\s)$') {
     $InstallDir = Join-Path $env:USERPROFILE 'dsh-launcher'
@@ -161,6 +262,11 @@ if ($env:DSH_TEST_MODE -eq '1' -and -not [string]::IsNullOrWhiteSpace($env:DSH_T
 }
 
 $staging = Join-Path $env:TEMP ('dsh-launcher-staging-' + [guid]::NewGuid().ToString('N'))
+$maintenanceMutex = $null
+$prepareDir = $null
+$oldInstallDir = $null
+$installSwapped = $false
+$installCommitted = $false
 try {
     Expand-Archive -LiteralPath $tmp -DestinationPath $staging -Force
     $stageEntry = Join-Path $staging 'deepseek.cmd'
@@ -174,12 +280,11 @@ try {
         throw (ConvertFrom-DshUnicodeText '\u4e0b\u8f7d\u5305\u4e2d\u672a\u627e\u5230 deepseek.cmd')
     }
     $payloadRoot = Split-Path -Parent $stageEntry
-    $nodeHelper = Join-Path $payloadRoot 'dsh-node-version.ps1'
-    if (-not (Test-Path -LiteralPath $nodeHelper)) {
-        throw (ConvertFrom-DshUnicodeText '\u4e0b\u8f7d\u5305\u4e2d\u672a\u627e\u5230 Node.js \u68c0\u67e5\u811a\u672c')
-    }
+
+    $packageVersion = Assert-DshPayloadPackage -PayloadRoot $payloadRoot
 
     Write-Host (ConvertFrom-DshUnicodeText '\u6b63\u5728\u68c0\u67e5 Node.js \u73af\u5883...')
+    $nodeHelper = Join-Path $payloadRoot 'dsh-node-version.ps1'
     . $nodeHelper
     if (-not (Assert-DshNodeEnvironment)) { exit 1 }
     $npmVer = $null
@@ -190,19 +295,54 @@ try {
     }
     Write-Host "npm $npmVer"
 
+    # R5: the commit phase is transactional. The payload is prepared on the same
+    # volume as the install directory, the old installation moves to an adjacent
+    # backup, the new payload renames into place, and only after the offline
+    # smoke check does the old backup get removed. Any failure restores the old
+    # installation; a failed restore keeps the backup and reports its location.
     Write-Host ((ConvertFrom-DshUnicodeText '\u6b63\u5728\u5b89\u88c5\u5230 ') + $InstallDir + ' ...')
-    if (Test-Path -LiteralPath $InstallDir) {
-        Write-Host (ConvertFrom-DshUnicodeText '\u76ee\u5f55\u5df2\u5b58\u5728\uff0c\u5c06\u8986\u76d6\u66f4\u65b0\u5176\u4e2d\u7684\u6587\u4ef6')
+    $maintenanceMutex = Enter-DshInstallMaintenanceLock -ProfileRoot $profileFull
+    if ($env:DSH_TEST_INSTALL_FAIL_STAGE -eq 'lock') {
+        throw 'Injected lock-stage failure'
     }
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $installParent = Split-Path -Parent $installFull
+    $prepareDir = Join-Path $installParent ('.dsh-launcher-payload-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $prepareDir | Out-Null
     $payloadItems = @(Get-ChildItem -LiteralPath $payloadRoot -Force -ErrorAction Stop)
     foreach ($payloadItem in $payloadItems) {
-        Copy-Item -LiteralPath $payloadItem.FullName -Destination $installFull -Recurse -Force
+        Copy-Item -LiteralPath $payloadItem.FullName -Destination $prepareDir -Recurse -Force
+    }
+    if ($env:DSH_TEST_INSTALL_FAIL_STAGE -eq 'copy') {
+        throw (ConvertFrom-DshUnicodeText '\u6d4b\u8bd5\u6ce8\u5165\uff1a\u53d1\u884c\u5305\u590d\u5236\u5931\u8d25')
     }
 
-    $installed = Test-Path -LiteralPath (Join-Path $InstallDir 'deepseek.cmd')
+    if (Test-Path -LiteralPath $installFull) {
+        $oldInstallDir = Join-Path $installParent ('.dsh-launcher-old-' + [guid]::NewGuid().ToString('N'))
+        if (-not (Move-DshDirectoryWithRetry -Source $installFull -Destination $oldInstallDir)) {
+            $oldInstallDir = $null
+            throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u65e7\u5b89\u88c5\u76ee\u5f55\u88ab\u5360\u7528\uff0c\u65e0\u6cd5\u5b8c\u6210\u4e8b\u52a1\u66ff\u6362\uff1b\u8bf7\u5148\u6267\u884c deepseek --stop \u540e\u91cd\u8bd5')
+        }
+    }
+    $installSwapped = $true
+    try {
+        Move-Item -LiteralPath $prepareDir -Destination $installFull -ErrorAction Stop
+        $prepareDir = $null
+    } catch {
+        if ($oldInstallDir -and (Test-Path -LiteralPath $oldInstallDir)) {
+            if (Move-DshDirectoryWithRetry -Source $oldInstallDir -Destination $installFull) {
+                $oldInstallDir = $null
+            }
+        }
+        $installSwapped = $false
+        throw
+    }
+    if ($env:DSH_TEST_INSTALL_FAIL_STAGE -eq 'swap') {
+        throw (ConvertFrom-DshUnicodeText '\u6d4b\u8bd5\u6ce8\u5165\uff1a\u76ee\u5f55\u4ea4\u6362\u540e\u5931\u8d25')
+    }
+
+    $installed = Test-Path -LiteralPath (Join-Path $installFull 'deepseek.cmd')
     if (-not $installed) {
-        throw ((ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u672a\u627e\u5230 ') + $InstallDir + '\deepseek.cmd')
+        throw ((ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u672a\u627e\u5230 ') + $installFull + '\deepseek.cmd')
     }
     $owner = [ordered]@{
         SchemaVersion = 1
@@ -214,7 +354,50 @@ try {
         ($owner | ConvertTo-Json),
         [Text.UTF8Encoding]::new($false)
     )
+    if ($env:DSH_TEST_INSTALL_FAIL_STAGE -eq 'marker') {
+        throw (ConvertFrom-DshUnicodeText '\u6d4b\u8bd5\u6ce8\u5165\uff1a\u6240\u6709\u6743\u6807\u8bb0\u5199\u5165\u540e\u5931\u8d25')
+    }
+
+    # Offline smoke check: the committed file set must carry the exact package
+    # version; no Node service, npm access or shortcut work happens here.
+    $installedVersion = ([string](Get-Content -LiteralPath (Join-Path $installFull 'VERSION') -Raw)).Trim()
+    if ($installedVersion -ne $packageVersion) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u5b89\u88c5\u540e VERSION \u4e0e\u53d1\u884c\u5305\u4e0d\u4e00\u81f4')
+    }
+    if ($env:DSH_TEST_INSTALL_FAIL_STAGE -eq 'smoke') {
+        throw (ConvertFrom-DshUnicodeText '\u6d4b\u8bd5\u6ce8\u5165\uff1a\u79bb\u7ebf\u70df\u9727\u9a8c\u8bc1\u5931\u8d25')
+    }
+
+    $installCommitted = $true
+    if ($oldInstallDir -and (Test-Path -LiteralPath $oldInstallDir)) {
+        try {
+            Remove-Item -LiteralPath $oldInstallDir -Recurse -Force -ErrorAction Stop
+            $oldInstallDir = $null
+        } catch {
+            Write-Host ((ConvertFrom-DshUnicodeText '\u65e7\u5b89\u88c5\u5907\u4efd\u672a\u80fd\u5220\u9664\uff0c\u5df2\u4fdd\u7559\u5728\uff1a') + $oldInstallDir)
+        }
+    }
+} catch {
+    if ($installSwapped -and -not $installCommitted) {
+        # R5 recovery: put the previous installation back exactly as it was.
+        if (Test-Path -LiteralPath $installFull) {
+            try { Remove-Item -LiteralPath $installFull -Recurse -Force -ErrorAction Stop } catch { }
+        }
+        if ($oldInstallDir -and (Test-Path -LiteralPath $oldInstallDir)) {
+            if (Move-DshDirectoryWithRetry -Source $oldInstallDir -Destination $installFull) {
+                $oldInstallDir = $null
+                Write-Host (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff0c\u5df2\u6062\u590d\u539f\u6709\u5b89\u88c5')
+            } else {
+                Write-Host ((ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\u4e14\u6062\u590d\u672a\u5b8c\u6210\uff0c\u65e7\u5b89\u88c5\u5907\u4efd\u4fdd\u7559\u5728\uff1a') + $oldInstallDir)
+            }
+        }
+    }
+    throw
 } finally {
+    if ($prepareDir -and (Test-Path -LiteralPath $prepareDir)) {
+        Remove-Item -LiteralPath $prepareDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Exit-DshInstallMaintenanceLock -Mutex $maintenanceMutex
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
 }
@@ -230,7 +413,21 @@ if (-not $SkipPath) {
     }
 }
 
-$desktop = [Environment]::GetFolderPath('Desktop')
+$desktop = $null
+$desktopOverride = [string]$env:DSH_TEST_DESKTOP_DIR
+if (-not [string]::IsNullOrWhiteSpace($desktopOverride)) {
+    # Test isolation hook (R4): only honored when the injected desktop lies
+    # inside the resolved user profile boundary.
+    try {
+        $desktopCandidate = [IO.Path]::GetFullPath($desktopOverride).TrimEnd('\')
+        if ($desktopCandidate.StartsWith($profileFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            $desktop = $desktopCandidate
+        }
+    } catch { }
+}
+if (-not $desktop) {
+    $desktop = [Environment]::GetFolderPath('Desktop')
+}
 if (-not [string]::IsNullOrWhiteSpace($desktop)) {
     $lnkPath = Join-Path $desktop 'DeepSeek Harness.lnk'
     $shortcutExists = Test-Path -LiteralPath $lnkPath

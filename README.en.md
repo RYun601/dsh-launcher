@@ -1,4 +1,4 @@
-# dsh-launcher
+﻿# dsh-launcher
 
 [中文](README.md) | [English](README.en.md)
 
@@ -105,21 +105,25 @@ After completing the installation above (any option) and opening a **new** termi
 | `deepseek` | Foreground mode (default): shows logs in a window; close the window or press Ctrl+C to stop |
 | `deepseek -b` / `-d` / `--background` / `--bg` / `--daemon` | Background mode: returns immediately while the service keeps starting; browser opens automatically when ready |
 | `deepseek --status` | Show service state (`READY` / `STARTING` / `UNHEALTHY` / `FOREIGN_PORT` / `FAILED` / `STOPPED`); `STARTING` covers download/install and `FAILED` includes the log path |
+| `deepseek --status --json` | Print the same state as versioned JSON (with timestamps and stable fields); problem states (`FAILED` / `UNHEALTHY` / `FOREIGN_PORT`) exit nonzero for scripting |
 | `deepseek --stop` | Stop the service (port 3080; only kills DeepSeek Harness processes) and remind how to restart; a failed kill or wait timeout fails loudly with a nonzero exit code |
 | `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
-| `deepseek --version` | Show launcher version and local DeepSeek Harness version |
-| `deepseek --update` | Compare the local version with the latest on npm and show how to update |
+| `deepseek --logs --follow [N]` | Follow the log (Ctrl+C to stop); reconnects automatically after rotation. Long-running background logs rotate to a single `.old` generation once they exceed 5 MB |
+| `deepseek --version` | Show the launcher version and the **active** DeepSeek Harness version (reads the `runtime-current.json` pointer first, falls back to the legacy runtime dir, and lists other inactive sources) |
+| `deepseek --update` | Compare the **active runtime** version with the latest on npm and show how to update; exits nonzero when the local version cannot be confirmed or the remote lookup fails - unknown is never treated as already latest |
 | `deepseek --upgrade` | One-click upgrade: resolve and validate the target version first; if the current runtime is healthy and already at least the target version, report that it is already latest and exit without stopping the service or running npm; otherwise stop the service, clear old DSH npx workspaces, sync the global `dsh` command, and restart in background; if the candidate fails because a plugin imports an export removed from DSH, it lists the incompatible plugins and asks whether to remove them, then retries the candidate after confirmation; declining or failing the repair falls back through current, previous, or legacy usable runtimes (only runtimes that pass readiness validation are used for rollback) |
+| `deepseek --update-launcher` | Query the launcher's latest stable GitHub release and compare it with the local version (query only, no file changes) |
+| `deepseek --upgrade-launcher` | Self-update the launcher: download the release package and verify its SHA-256 and manifest, take the maintenance mutex, back up the old install directory, place the new version, run an offline smoke check, then commit; refuses while a service is running, a DSH upgrade is in progress, in a source worktree, or for unmanaged installs; failures restore the old version automatically (an incomplete restore keeps the backup plus a recovery script and exits with code 2) |
 | `deepseek --uninstall` | Remove the `deepseek` command from the user PATH (unregister) |
 | `deepseek --uninstall --full` | Full uninstall: PATH + desktop shortcut + logs/runtime dir + install dir (with confirmation — cancelling changes nothing; stops the service first, moves directories to a backup before deletion; PATH is removed only after every directory is safely backed up; the install dir is validated against its ownership marker, and a failed cleanup keeps the backup with its location) |
-| `deepseek --check` | Environment self-check (script path / npm / port) |
+| `deepseek --check` / `deepseek --doctor` | Environment diagnosis: launcher install and version, Node/npm, active runtime and pointer, service state and port 3080 owner, plus the last recorded failure; exits nonzero when it finds a problem |
 | `deepseek --help` | Show help |
 
 - Normal startup prefers the prepared and validated local DSH version and does not contact npm when a usable runtime exists. Dependencies are prepared only for a first launch or repair without a usable runtime. Use `deepseek --update` to discover releases from npm and `deepseek --upgrade` to install and switch versions.
 - `deepseek --update` / `deepseek --upgrade` query the npm public registry's dist-tags directly (faster than `npm view`). To use a mirror or a private registry, set the `DSH_REGISTRY` environment variable (e.g. `https://registry.npmmirror.com`). It only affects remote release discovery, never local runtime startup.
 - `deepseek --upgrade` also syncs the global `dsh` command: upgrades it to the latest version when installed, or installs it when missing, so the `dsh` command stays in line with the launcher. A failure here only prints a warning and never blocks the launcher runtime upgrade. If the target version cannot be resolved or is invalid, the upgrade aborts before stopping anything and leaves the current install untouched.
 - If the candidate startup log confirms that a plugin imports an export removed from DSH, `deepseek --upgrade` lists the plugin names and asks whether to remove them from the `web` profile. After confirmation it runs the target version's `dsh plugin --profile web remove` command and retries the candidate; declining preserves the plugins and falls back to the old runtime.
-- Only one action is allowed per invocation (`--help`, `--status`, `--stop`, `-b`, ... are mutually exclusive); combining actions fails with an error. `--full` is only valid together with `--uninstall` and reaches the transactional full uninstaller; a number is valid only immediately after `--logs` as its single line count. Real exit codes from the PowerShell layer are propagated unchanged to the `deepseek` command.
+- Only one action is allowed per invocation (`--help`, `--status`, `--stop`, `-b`, ... are mutually exclusive); combining actions fails with an error. `--full` is only valid together with `--uninstall` and reaches the transactional full uninstaller; a number is valid only immediately after `--logs` as its single line count, `--json` only after `--status`, and `--follow` only after `--logs`. Real exit codes from the PowerShell layer are propagated unchanged to the `deepseek` command.
 - Node.js `^22.19.0 || >=24.0.0` is required (same as upstream): install, start and upgrade share one version check and fail with the current version, the required range, and an upgrade hint before any runtime preparation happens.
 
 ## Other Ways to Start
@@ -138,7 +142,13 @@ After completing the installation above (any option) and opening a **new** termi
 | `background-run.ps1` | Owns the background startup lock, lifecycle state, log, readiness monitor, and DSH child process |
 | `background-run.cmd` | Compatibility entrypoint for the background runner; normal startup invokes `background-run.ps1` directly |
 | `run-dsh.ps1` | Serializes runtime preparation, completes required peers, audits the tree with `npm ls --all`, and starts the Node entrypoint |
-| `update-check.ps1` | Version comparison: managed runtime / legacy npx cache / global install vs latest on npm |
+| `update-check.ps1` | Version comparison: active runtime pointer vs latest on npm (other sources are informational only) |
+| `update-launcher.ps1` | Launcher self-update: query / download / verify the GitHub release and transactionally replace the current install (`--update-launcher` / `--upgrade-launcher`) |
+| `dsh-doctor.ps1` | Implementation of `deepseek --doctor` / `--check` environment diagnosis |
+| `dsh-logs.ps1` | Implementation of `deepseek --logs` viewing and follow mode (rotation-aware reconnect) |
+| `dsh-maintenance-lock.ps1` | Launcher maintenance mutex shared by overwrite install, DSH upgrade, self-update and full uninstall |
+| `version-info.ps1` | Implementation of the `deepseek --version` version source (active pointer first) |
+| `register-path.ps1` | Implementation of the user PATH registration behind `install-command.cmd` |
 | `upgrade-dsh.ps1` | One-click upgrade: stop service, clear legacy DSH npx workspaces, prepare and start the latest runtime |
 | `set-shortcut.ps1` | Create or migrate the desktop shortcut to the visible startup progress window |
 | `uninstall.ps1` | Uninstall: remove PATH registration (`-Full` also removes shortcut / logs and runtime / install dir) |

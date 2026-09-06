@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $stateHelper = Join-Path $repoRoot 'dsh-launch-state.ps1'
@@ -41,6 +41,7 @@ function New-UpgradeFixture {
     Copy-Item -LiteralPath $versionHelper -Destination (Join-Path $Root 'dsh-version.ps1')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-node-version.ps1') -Destination (Join-Path $Root 'dsh-node-version.ps1')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-runtime-layout.ps1') -Destination (Join-Path $Root 'dsh-runtime-layout.ps1')
+    Copy-Item -LiteralPath (Join-Path $repoRoot 'dsh-maintenance-lock.ps1') -Destination (Join-Path $Root 'dsh-maintenance-lock.ps1')
     [IO.File]::WriteAllText(
         (Join-Path $Root 'resolve-dsh-version.ps1'),
         "Write-Output '$ResolvedVersion'`r`n",
@@ -142,7 +143,8 @@ function Invoke-UpgradeFixture {
         [pscustomobject]$Fixture,
         [string]$NodeVersion = '',
         [string]$StartFailVersion = '',
-        [string]$PromptAnswer = ''
+        [string]$PromptAnswer = '',
+        [string]$MaintenanceTimeout = '30000'
     )
 
     $previousPath = $env:PATH
@@ -157,6 +159,8 @@ function Invoke-UpgradeFixture {
     $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
     $previousNodeLog = $env:DSH_TEST_NODE_LOG
     $previousPluginRemoveMarker = $env:DSH_TEST_PLUGIN_REMOVE_MARKER
+    $previousMaintenanceTimeout = $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS
+    $previousErrorActionPreference = $ErrorActionPreference
     try {
         $env:PATH = "$($Fixture.FakeBin);$previousPath"
         $env:APPDATA = $Fixture.AppData
@@ -168,10 +172,13 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_NPM_LOG = $Fixture.NpmLog
         $env:DSH_TEST_STOP_MARKER = $Fixture.StopMarker
         $env:DSH_TEST_NODE_VERSION = $NodeVersion
+        $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS = $MaintenanceTimeout
         $nodeLog = Join-Path $Fixture.Root 'node.log'
         $pluginRemoveMarker = Join-Path $Fixture.Root 'plugin-removed.marker'
         $env:DSH_TEST_NODE_LOG = $nodeLog
         $env:DSH_TEST_PLUGIN_REMOVE_MARKER = $pluginRemoveMarker
+        # 子进程的 stderr（如预期的互斥超时）不能以 NativeCommandError 终止父测试。
+        $ErrorActionPreference = 'Continue'
         if ($PromptAnswer) {
             $output = @($PromptAnswer) | & powershell.exe -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
@@ -179,6 +186,7 @@ function Invoke-UpgradeFixture {
             $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
                 -File (Join-Path $Fixture.Root 'upgrade-dsh.ps1') 2>&1
         }
+        $ErrorActionPreference = $previousErrorActionPreference
         return [pscustomobject]@{
             ExitCode = $LASTEXITCODE
             Output   = [string]($output -join [Environment]::NewLine)
@@ -196,6 +204,8 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
         $env:DSH_TEST_NODE_LOG = $previousNodeLog
         $env:DSH_TEST_PLUGIN_REMOVE_MARKER = $previousPluginRemoveMarker
+        $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS = $previousMaintenanceTimeout
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 }
 
@@ -428,6 +438,39 @@ try {
             'A failed upgrade must clear its transaction'
         Assert-True (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-current.json')) `
             'The pointer must remain intact after a failed upgrade'
+        # 回退指针一致性：恢复成功后活动指针必须同步到恢复版本，
+        # 否则下一次普通启动不会复用恢复出来的运行时。
+        $syncedPointer = Get-Content -LiteralPath (Join-Path $launchDir 'runtime-current.json') -Raw | ConvertFrom-Json
+        Assert-Equal '0.1.0-rc.7' ([string]$syncedPointer.Current.Version) `
+            'The active pointer must be re-pointed at the restored legacy runtime'
+        Assert-Equal 'runtime' ([string]$syncedPointer.Current.Path) `
+            'The restored legacy runtime must be recorded as a relative pointer path'
+    }
+
+    Invoke-Test 'a second upgrade fails fast while the maintenance lock is held by another transaction' {
+        # R9：两个升级（或升级与覆盖安装/自更新/卸载）必须互斥，不能交错提交。
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-mutex') `
+            -NpmLog (Join-Path $testRoot 'upgrade-mutex-npm.log')
+        . (Join-Path $repoRoot 'dsh-maintenance-lock.ps1')
+        $holderMutex = Enter-DshMaintenanceLock -LaunchRoot (Join-Path $fixture.UserProfile 'dsh-launch') `
+            -TimeoutMilliseconds 200
+        try {
+            $result = Invoke-UpgradeFixture -Fixture $fixture -MaintenanceTimeout '500'
+            Assert-Equal 1 $result.ExitCode 'A blocked upgrade must fail with a nonzero exit code'
+            Assert-Match $result.Output 'maintenance lock' 'The failure must name the launcher maintenance lock'
+            Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) `
+                'A blocked upgrade must not stop the service'
+            Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) `
+                'A blocked upgrade must not restart the service'
+            Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.UserProfile 'dsh-launch\runtime-upgrade.json'))) `
+                'A blocked upgrade must not write its own transaction record'
+        } finally {
+            Exit-DshMaintenanceLock -Mutex $holderMutex
+        }
+
+        # 锁释放后，同一安装上的升级必须可以正常完成。
+        $afterRelease = Invoke-UpgradeFixture -Fixture $fixture
+        Assert-Equal 0 $afterRelease.ExitCode "An upgrade must succeed once the maintenance lock is free. Output:`n$($afterRelease.Output)"
     }
 
     Invoke-Test 'confirmed incompatible plugins are removed and the candidate startup is retried' {

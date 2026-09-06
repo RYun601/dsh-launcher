@@ -1,4 +1,4 @@
-# AGENTS.md
+﻿# AGENTS.md
 
 ## 适用范围
 
@@ -27,16 +27,21 @@
 ### 状态、运行时与版本
 
 - `dsh-launch-state.ps1`：启动锁、状态文件、令牌转移、存活检查和状态输出的共享实现。
+- `dsh-version.ps1` / `version-info.ps1`：版本比较共享函数与 `deepseek --version` 的版本来源实现（活动运行时指针优先，`Get-DshRuntimeVersionReport` 是统一查询入口）。
+- `dsh-maintenance-lock.ps1`：启动器维护互斥（覆盖安装、DSH 升级、自更新、完整卸载共用；`install.ps1` 内嵌同派生副本以支持 `irm | iex`，修改锁名派生时必须两处同步）。
 - `resolve-dsh-version.ps1`：选择本地已安装版本或 npm 发布版本。
 - `run-dsh.ps1`：串行准备版本化运行时、修复必要 peer 依赖、执行 npm 审计并启动 Node 入口。
 - `dsh-version.ps1`：版本解析和比较的共享函数。
-- `update-check.ps1`：比较本地运行时、旧缓存、全局安装和 npm 最新版本。
+- `update-check.ps1`：比较活动运行时指针版本与 npm 最新版本；本地未知或远端失败都以非零码退出。
+- `update-launcher.ps1`：启动器自更新（`--update-launcher` 查询 / `--upgrade-launcher` 执行）：下载并校验 GitHub 发行包（SHA-256 + 包内清单）、维护互斥、目录级事务替换与失败恢复。
+- `dsh-doctor.ps1`：`deepseek --doctor` / `--check` 的只读环境诊断，问题状态以非零码退出。
+- `dsh-logs.ps1`：`deepseek --logs` 的查看与跟随实现；基于路径轮询，轮转后自动重连。
 - `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、同步全局 `dsh` 命令（缺失则安装、旧版则升级）、准备新运行时并重新后台启动。
 
 ### 安装与维护
 
 - `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。
-- `install-command.cmd`：把安装目录注册到用户 `PATH`。
+- `install-command.cmd`：把安装目录注册到用户 `PATH`（复杂逻辑在 `register-path.ps1`，通过 `-File` 调用以兼容特殊字符路径）。
 - `set-shortcut.ps1`：创建或迁移桌面快捷方式。
 - `stop-dsh.ps1` / `stop-dsh.cmd`：按端口识别并停止 DSH 相关进程。
 - `uninstall.ps1`：移除 `PATH` 注册；完整卸载时还会处理快捷方式、日志、运行时和安装目录。
@@ -87,6 +92,10 @@
 8. `--stop` 只能停止与 DSH 启动链路相符的进程，不能因为端口被占用就终止任意进程。
 9. CLI、前台/后台包装器、升级和卸载流程必须传播真实退出码。未知参数必须报错，不能静默回落到前台启动。
 10. 正常的子进程标准错误输出本身不等于启动失败；最终状态应根据进程退出、HTTP 就绪和生命周期状态共同判断。
+11. 覆盖安装、DSH 升级、启动器自更新和完整卸载等维护事务必须持有共享维护互斥（`dsh-maintenance-lock.ps1`），锁顺序固定为维护锁 → 启动锁 → 运行时互斥；DSH 升级事务的读写与清除必须校验事务 ID。
+12. 运行时路径在字符串边界之外还必须满足物理边界：从 launch root 到目标的任何一级存在指向受管树之外的重解析点即拒绝；清理逻辑绝不递归删除重解析点目录。
+13. 版本查询与更新检查以活动运行时指针为准；本地版本未知时不能解释为“已是最新”，远端解析失败必须以非零码退出。
+14. 无 BOM 的 UTF-8 脚本会被 Windows PowerShell 5.1 按 ANSI 解码：无 BOM 文件中的注释与字符串字面量必须保持 ASCII；测试夹具重写带 BOM 的脚本时必须保留 BOM。
 
 运行数据通常位于 `%USERPROFILE%\dsh-launch`，用户的 DSH 配置和凭据位于 `%USERPROFILE%\.dsh`。不要在测试、日志、提交或诊断输出中读取或复制真实 API Key。`%USERPROFILE%\.dsh` 是唯一不可通过重新安装再生的数据（运行时可随时由 npm 重装重建）；任何脚本、清理或卸载逻辑都必须确保绝不写入、移动或删除该目录。
 

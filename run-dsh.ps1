@@ -13,15 +13,15 @@
 
 $ErrorActionPreference = 'Stop'
 
+# 运行时根目录必须位于启动器拥有的用户目录边界内（含物理边界：
+# 任何一级是 junction/symlink 指向边界之外都必须拒绝）。
+. (Join-Path $PSScriptRoot 'dsh-runtime-layout.ps1')
+
 $launchRoot = [IO.Path]::GetFullPath((Join-Path $env:USERPROFILE 'dsh-launch'))
 if (-not $RuntimeRoot) {
     $RuntimeRoot = Join-Path $launchRoot 'runtime'
 }
-$RuntimeRoot = [IO.Path]::GetFullPath($RuntimeRoot)
-$launchRootPrefix = $launchRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-if (-not $RuntimeRoot.StartsWith($launchRootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-    throw "RuntimeRoot must be inside the launcher-owned directory: $launchRoot"
-}
+$RuntimeRoot = Assert-DshRuntimePathWithinOwnedRoot -Root $launchRoot -Path ([IO.Path]::GetFullPath($RuntimeRoot))
 
 # Node.js 版本前置检查：准备或启动运行时之前失败，避免错误滞后且难以定位。
 . (Join-Path $PSScriptRoot 'dsh-node-version.ps1')

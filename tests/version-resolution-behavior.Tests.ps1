@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $resolver = Join-Path $repoRoot 'resolve-dsh-version.ps1'
@@ -19,6 +19,13 @@ function Assert-Equal {
 function Assert-Match {
     param([string]$Actual, [string]$Pattern, [string]$Message)
     if ($Actual -notmatch $Pattern) {
+        throw "$Message`nActual:`n$Actual"
+    }
+}
+
+function Assert-NotMatch {
+    param([string]$Actual, [string]$Pattern, [string]$Message)
+    if ($Actual -match $Pattern) {
         throw "$Message`nActual:`n$Actual"
     }
 }
@@ -259,6 +266,25 @@ try {
         } finally {
             Stop-Job -Job $listenerJob -ErrorAction SilentlyContinue
             Remove-Job -Job $listenerJob -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Invoke-Test 'version query survives install paths with spaces, single quotes, exclamation marks and non-ASCII' {
+        # R8 验收：deepseek.cmd 的 --version 分派改用 -File 调用 version-info.ps1，
+        # 安装路径包含空格、单引号、感叹号或中文时不得再出现 ParserError。
+        $launcherFiles = @('deepseek.cmd', 'version-info.ps1', 'dsh-version.ps1', 'dsh-runtime-layout.ps1', 'VERSION')
+        foreach ($dirName in @("launcher's copy", 'launcher 目录 with space!', 'sp ace')) {
+            $installDir = Join-Path $testRoot $dirName
+            New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+            foreach ($fileName in $launcherFiles) {
+                Copy-Item -LiteralPath (Join-Path $repoRoot $fileName) -Destination (Join-Path $installDir $fileName)
+            }
+            $output = & cmd.exe /c ('"' + (Join-Path $installDir 'deepseek.cmd') + '" --version') 2>&1
+            $exitCode = $LASTEXITCODE
+            $outputText = [string]($output -join [Environment]::NewLine)
+            Assert-Equal 0 $exitCode "Version query must succeed in: $dirName. Output:`n$outputText"
+            Assert-Match $outputText 'dsh-launcher 0\.1\.11' "The launcher version must be reported in: $dirName"
+            Assert-NotMatch $outputText 'ParserError|Exception' "No parse errors may appear in: $dirName"
         }
     }
 

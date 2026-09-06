@@ -1,4 +1,4 @@
-param([string]$ArchivePath)
+﻿param([string]$ArchivePath)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -27,7 +27,13 @@ $requiredRuntimeFiles = @(
     'dsh-runtime-layout.ps1',
     'run-dsh.ps1',
     'resolve-dsh-version.ps1',
-    'dsh-version.ps1'
+    'dsh-version.ps1',
+    'dsh-maintenance-lock.ps1',
+    'version-info.ps1',
+    'register-path.ps1',
+    'update-launcher.ps1',
+    'dsh-doctor.ps1',
+    'dsh-logs.ps1'
 )
 
 function Assert-Equal {
@@ -92,6 +98,7 @@ function Invoke-PackagedInstaller {
     $startInfo.EnvironmentVariables['DSH_TEST_MODE'] = '1'
     $startInfo.EnvironmentVariables['DSH_TEST_INSTALL_ARCHIVE'] = $installerArchive
     $startInfo.EnvironmentVariables['DSH_TEST_NODE_LOG'] = $installerNodeLog
+    $startInfo.EnvironmentVariables['DSH_TEST_DESKTOP_DIR'] = (Join-Path $profileRoot 'Desktop')
     $process = [Diagnostics.Process]::Start($startInfo)
     if (-not $process.WaitForExit(10000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -150,6 +157,10 @@ try {
     $check = Invoke-PackagedCommand -Arguments '--check' -PathValue "$fakeBin;$env:PATH"
     Assert-Equal 0 $check.ExitCode "Packaged --check failed. Output:`n$($check.Output)"
     Assert-Match $check.Output 'npm: found' 'Packaged --check must find npm'
+
+    $version = Invoke-PackagedCommand -Arguments '--version' -PathValue $env:PATH
+    Assert-Equal 0 $version.ExitCode "Packaged --version failed. Output:`n$($version.Output)"
+    Assert-Match $version.Output 'dsh-launcher ' 'Packaged --version must print the launcher version'
 
     $status = Invoke-PackagedCommand -Arguments '--status' -PathValue $env:PATH
     Assert-Equal 0 $status.ExitCode "Packaged --status failed. Output:`n$($status.Output)"

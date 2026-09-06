@@ -955,7 +955,7 @@ try {
     Invoke-Test '--logs accepts one numeric count' {
         $result = Invoke-DeepseekCommand -Argument '--logs 50'
         Assert-Equal 0 $result.ExitCode '--logs 50 should dispatch normally'
-        Assert-Match $result.ProcessLog '-Tail 50(?:\s|$)' 'The requested log count must reach PowerShell'
+        Assert-Match $result.ProcessLog 'dsh-logs\.ps1.*-Count 50(?:\s|$)' 'The requested log count must reach PowerShell'
     }
 
     Invoke-Test 'conflicting actions are rejected without dispatching either' {
@@ -972,10 +972,13 @@ try {
             [pscustomobject]@{ Argument = '-b'; ExpectedLog = 'start-background\.ps1' },
             [pscustomobject]@{ Argument = '--stop'; ExpectedLog = 'stop-dsh\.ps1' },
             [pscustomobject]@{ Argument = '--status'; ExpectedLog = 'dsh-launch-state\.ps1' },
-            [pscustomobject]@{ Argument = '--logs 50'; ExpectedLog = '-Tail 50(?:\s|$)' },
+            [pscustomobject]@{ Argument = '--status --json'; ExpectedLog = 'GetStatusJson' },
+            [pscustomobject]@{ Argument = '--logs --follow 50'; ExpectedLog = 'dsh-logs\.ps1.*-Count 50.*-Follow' },
+            [pscustomobject]@{ Argument = '--logs 50'; ExpectedLog = 'dsh-logs\.ps1.*-Count 50(?:\s|$)' },
             [pscustomobject]@{ Argument = '--upgrade'; ExpectedLog = 'upgrade-dsh\.ps1' },
             [pscustomobject]@{ Argument = '--update'; ExpectedLog = 'update-check\.ps1' },
-            [pscustomobject]@{ Argument = '--version'; ExpectedLog = 'dsh-version\.ps1' },
+            [pscustomobject]@{ Argument = '--version'; ExpectedLog = 'version-info\.ps1' },
+            [pscustomobject]@{ Argument = '--update-launcher'; ExpectedLog = 'update-launcher\.ps1' },
             [pscustomobject]@{ Argument = '--uninstall'; ExpectedLog = 'uninstall\.ps1' },
             [pscustomobject]@{ Argument = ''; ExpectedLog = 'start-foreground\.ps1' }
         )
@@ -987,9 +990,29 @@ try {
         }
     }
 
-    Invoke-Test 'internal --check succeeds after its checks complete' {
+    Invoke-Test '--check dispatches to the doctor and propagates its findings exit code' {
         $result = Invoke-DeepseekCommand -Argument '--check' -PowerShellExitCode 7
-        Assert-Equal 0 $result.ExitCode '--check must not inherit a PowerShell exit code because it completes internally'
+        Assert-Equal 7 $result.ExitCode '--check must run the doctor and propagate its findings exit code'
+        Assert-Match $result.ProcessLog 'dsh-doctor\.ps1' '--check must dispatch to the doctor diagnosis'
+    }
+
+    Invoke-Test 'launcher self-update actions dispatch and reject conflicting combinations' {
+        # 阶段 C：--update-launcher 只查询；--upgrade-launcher 走自覆盖安全的
+        # goto 分派（不再经过 call 返回到可能已被替换的批处理行）。
+        $checkResult = Invoke-DeepseekCommand -Argument '--update-launcher' -PowerShellExitCode 5
+        Assert-Equal 5 $checkResult.ExitCode 'The update-launcher exit code must propagate'
+        Assert-Match $checkResult.ProcessLog 'update-launcher\.ps1' 'The check action must dispatch to update-launcher.ps1'
+        Assert-NotMatch $checkResult.ProcessLog '-Upgrade' 'The check action must not pass -Upgrade'
+
+        $upgradeResult = Invoke-DeepseekCommand -Argument '--upgrade-launcher' -PowerShellExitCode 6
+        Assert-Equal 6 $upgradeResult.ExitCode 'The upgrade-launcher exit code must propagate'
+        Assert-Match $upgradeResult.ProcessLog 'update-launcher\.ps1.*-Upgrade' 'The upgrade action must dispatch with -Upgrade'
+
+        foreach ($conflict in @('--update-launcher --upgrade', '--upgrade-launcher -b', '--update-launcher --upgrade-launcher')) {
+            $conflictResult = Invoke-DeepseekCommand -Argument $conflict
+            Assert-Equal 1 $conflictResult.ExitCode "Conflicting self-update actions must fail: $conflict"
+            Assert-NotMatch $conflictResult.ProcessLog 'update-launcher\.ps1' "Conflicting input must not dispatch: $conflict"
+        }
     }
 
     Invoke-Test 'shortcut wait mode leaves browser opening to the runner monitor' {

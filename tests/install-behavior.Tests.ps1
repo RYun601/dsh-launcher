@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
@@ -85,8 +85,17 @@ function Invoke-Test {
     Write-Host "PASS: $Name"
 }
 
+function Assert-Match {
+    param([string]$Actual, [string]$Pattern, [string]$Message)
+    if ($Actual -notmatch $Pattern) { throw "$Message`nActual:`n$Actual" }
+}
+
 function Invoke-Installer {
-    param([string]$InstallDir)
+    param(
+        [string]$InstallDir,
+        [string]$ArchivePath = $archivePath,
+        [string]$FailStage = ''
+    )
 
     $previousPath = $env:PATH
     $previousTestMode = $env:DSH_TEST_MODE
@@ -94,14 +103,21 @@ function Invoke-Installer {
     $previousProfile = $env:USERPROFILE
     $previousTemp = $env:TEMP
     $previousNodeLog = $env:DSH_TEST_NODE_LOG
+    $previousFailStage = $env:DSH_TEST_INSTALL_FAIL_STAGE
+    $previousDesktop = $env:DSH_TEST_DESKTOP_DIR
+    $previousMaintenanceTimeout = $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         $env:PATH = "$fakeBin;$previousPath"
         $env:DSH_TEST_MODE = '1'
-        $env:DSH_TEST_INSTALL_ARCHIVE = $archivePath
+        $env:DSH_TEST_INSTALL_ARCHIVE = $ArchivePath
         $env:USERPROFILE = $profileRoot
         $env:TEMP = $tempRoot
         $env:DSH_TEST_NODE_LOG = $nodeLog
+        $env:DSH_TEST_INSTALL_FAIL_STAGE = $FailStage
+        # R4 isolation: the installer's desktop access is injected into the fixture.
+        $env:DSH_TEST_DESKTOP_DIR = (Join-Path $profileRoot 'Desktop')
+        $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS = '10000'
         $ErrorActionPreference = 'Continue'
         $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installer `
             -InstallDir $InstallDir -SkipPath 2>&1
@@ -117,6 +133,9 @@ function Invoke-Installer {
         $env:USERPROFILE = $previousProfile
         $env:TEMP = $previousTemp
         $env:DSH_TEST_NODE_LOG = $previousNodeLog
+        $env:DSH_TEST_INSTALL_FAIL_STAGE = $previousFailStage
+        $env:DSH_TEST_DESKTOP_DIR = $previousDesktop
+        $env:DSH_TEST_MAINTENANCE_TIMEOUT_MS = $previousMaintenanceTimeout
         $ErrorActionPreference = $previousErrorActionPreference
     }
 }
@@ -178,10 +197,13 @@ function Assert-RejectedWithoutWrite {
 }
 
 New-Item -ItemType Directory -Force -Path $testRoot, $profileRoot, $tempRoot, $payloadRoot, $fakeBin | Out-Null
+New-Item -ItemType Directory -Force -Path (Join-Path $profileRoot 'Desktop') | Out-Null
 try {
     [IO.File]::WriteAllText((Join-Path $payloadRoot 'deepseek.cmd'), '@echo off' + "`r`n", [Text.Encoding]::ASCII)
     Copy-Item -LiteralPath $nodeHelper -Destination (Join-Path $payloadRoot 'dsh-node-version.ps1')
     [IO.File]::WriteAllText((Join-Path $payloadRoot 'sentinel.txt'), 'payload', [Text.Encoding]::ASCII)
+    # R5: the installer validates the package VERSION before executing payload scripts.
+    [IO.File]::WriteAllText((Join-Path $payloadRoot 'VERSION'), "0.1.11`r`n", [Text.Encoding]::ASCII)
     Compress-Archive -Path (Join-Path $payloadRoot '*') -DestinationPath $archivePath -CompressionLevel Optimal
 
     [IO.File]::WriteAllText(
@@ -268,6 +290,119 @@ try {
         }
         if ($shortAliasCount -eq 0) {
             Write-Host 'SKIP: volume does not expose 8.3 aliases; GetLongPathName fixture was still exercised'
+        }
+    }
+
+    # R5: transactional overwrite install helpers.
+    function New-VersionedArchive {
+        param([string]$Path, [string]$Version, [hashtable]$Files)
+
+        $payload = Join-Path $testRoot ('payload-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $payload | Out-Null
+        [IO.File]::WriteAllText((Join-Path $payload 'VERSION'), "$Version`r`n", [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText((Join-Path $payload 'deepseek.cmd'), '@echo off' + "`r`n", [Text.Encoding]::ASCII)
+        Copy-Item -LiteralPath $nodeHelper -Destination (Join-Path $payload 'dsh-node-version.ps1')
+        foreach ($fileName in $Files.Keys) {
+            [IO.File]::WriteAllText((Join-Path $payload $fileName), [string]$Files[$fileName], [Text.Encoding]::ASCII)
+        }
+        Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $Path -CompressionLevel Optimal
+        Remove-Item -LiteralPath $payload -Recurse -Force
+    }
+
+    function Get-LeftoverTransactionDirs {
+        param([string]$InstallDir)
+        $parent = Split-Path -Parent $installDir
+        return @(Get-ChildItem -LiteralPath $parent -Directory -Force -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -like '.dsh-launcher-old-*' -or $_.Name -like '.dsh-launcher-payload-*'
+        })
+    }
+
+    Invoke-Test 'a busy old install aborts the overwrite and keeps the old file set consistent' {
+        $archiveV1 = Join-Path $testRoot 'tx-v1.zip'
+        $archiveV2 = Join-Path $testRoot 'tx-v2.zip'
+        New-VersionedArchive -Path $archiveV1 -Version '1.0.0' -Files @{ 'a.txt' = 'old'; 'b.txt' = 'old' }
+        New-VersionedArchive -Path $archiveV2 -Version '2.0.0' -Files @{ 'a.txt' = 'new'; 'b.txt' = 'new' }
+        $installDir = Join-Path $profileRoot 'tx-install'
+        $first = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV1
+        Assert-Equal 0 $first.ExitCode "First install must succeed. Output:`n$($first.Output)"
+        Assert-Equal 'old' ([IO.File]::ReadAllText((Join-Path $installDir 'b.txt')).Trim()) 'Fixture baseline must hold'
+
+        # Holding b.txt open blocks the transactional directory swap.
+        $lockedStream = [IO.File]::Open((Join-Path $installDir 'b.txt'), 'Open', 'ReadWrite', 'None')
+        try {
+            $second = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV2
+            Assert-True ($second.ExitCode -ne 0) "A busy old install must abort. Output:`n$($second.Output)"
+        } finally {
+            $lockedStream.Dispose()
+        }
+        Assert-Equal 'old' ([IO.File]::ReadAllText((Join-Path $installDir 'a.txt')).Trim()) 'The old file must remain after the aborted overwrite'
+        Assert-Equal 'old' ([IO.File]::ReadAllText((Join-Path $installDir 'b.txt')).Trim()) 'The old file set must stay consistent'
+        Assert-Equal 0 @(Get-LeftoverTransactionDirs -InstallDir $installDir).Count 'No transaction directories may be left behind'
+    }
+
+    Invoke-Test 'an injected post-swap failure restores the previous installation' {
+        $archiveV1 = Join-Path $testRoot 'tx-restore-v1.zip'
+        $archiveV2 = Join-Path $testRoot 'tx-restore-v2.zip'
+        New-VersionedArchive -Path $archiveV1 -Version '1.0.0' -Files @{ 'a.txt' = 'old' }
+        New-VersionedArchive -Path $archiveV2 -Version '2.0.0' -Files @{ 'a.txt' = 'new' }
+        $installDir = Join-Path $profileRoot 'tx-restore-install'
+        $first = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV1
+        Assert-Equal 0 $first.ExitCode "First install must succeed. Output:`n$($first.Output)"
+
+        foreach ($stage in @('copy', 'swap', 'marker', 'smoke')) {
+            $failed = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV2 -FailStage $stage
+            Assert-True ($failed.ExitCode -ne 0) "Injected $stage failure must abort. Output:`n$($failed.Output)"
+            Assert-Equal 'old' ([IO.File]::ReadAllText((Join-Path $installDir 'a.txt')).Trim()) `
+                "A $stage failure must restore the previous file content"
+            Assert-Equal '1.0.0' ([IO.File]::ReadAllText((Join-Path $installDir 'VERSION')).Trim()) `
+                "A $stage failure must restore the previous VERSION"
+            Assert-True (Test-Path -LiteralPath (Join-Path $installDir 'deepseek.cmd')) `
+                "A $stage failure must leave a runnable previous installation"
+            Assert-Equal 0 @(Get-LeftoverTransactionDirs -InstallDir $installDir).Count `
+                "A $stage failure must not leave transaction directories behind"
+        }
+    }
+
+    Invoke-Test 'a committed overwrite replaces the whole file set instead of mixing versions' {
+        $archiveV1 = Join-Path $testRoot 'tx-commit-v1.zip'
+        $archiveV2 = Join-Path $testRoot 'tx-commit-v2.zip'
+        New-VersionedArchive -Path $archiveV1 -Version '1.0.0' -Files @{ 'a.txt' = 'old'; 'b.txt' = 'old' }
+        New-VersionedArchive -Path $archiveV2 -Version '2.0.0' -Files @{ 'a.txt' = 'new'; 'c.txt' = 'added' }
+        $installDir = Join-Path $profileRoot 'tx-commit-install'
+        $first = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV1
+        Assert-Equal 0 $first.ExitCode "First install must succeed. Output:`n$($first.Output)"
+
+        $second = Invoke-Installer -InstallDir $installDir -ArchivePath $archiveV2
+        Assert-Equal 0 $second.ExitCode "Second install must succeed. Output:`n$($second.Output)"
+        Assert-Equal 'new' ([IO.File]::ReadAllText((Join-Path $installDir 'a.txt')).Trim()) 'The committed overwrite must update existing files'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDir 'b.txt'))) 'The committed overwrite must not keep stale files from the old version'
+        Assert-Equal 'added' ([IO.File]::ReadAllText((Join-Path $installDir 'c.txt')).Trim()) 'The committed overwrite must add new files'
+        Assert-Equal '2.0.0' ([IO.File]::ReadAllText((Join-Path $installDir 'VERSION')).Trim()) 'The committed VERSION must match the package'
+        Assert-Equal 0 @(Get-LeftoverTransactionDirs -InstallDir $installDir).Count 'A committed install must clean its old-install backup'
+    }
+
+    Invoke-Test 'path registration survives special-character install directories' {
+        # R8 验收：安装注册对空格、单引号、感叹号、中文路径必须可用，且真实
+        # 用户 PATH（经注入的文件存储模拟）不被触碰。
+        $storePath = Join-Path $testRoot 'register-path-store.txt'
+        [IO.File]::WriteAllText($storePath, 'C:\other\tool', [Text.UTF8Encoding]::new($false))
+        foreach ($dirName in @("launcher's copy", 'launcher 目录 with space!', 'sp ace')) {
+            $target = Join-Path $testRoot $dirName
+            New-Item -ItemType Directory -Force -Path $target | Out-Null
+            $previousStore = $env:DSH_TEST_REGISTER_PATH_STORE
+            $env:DSH_TEST_REGISTER_PATH_STORE = $storePath
+            try {
+                $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass `
+                    -File (Join-Path $repoRoot 'register-path.ps1') -InstallDir $target 2>&1
+                $exitCode = $LASTEXITCODE
+            } finally {
+                $env:DSH_TEST_REGISTER_PATH_STORE = $previousStore
+            }
+            $outputText = [string]($output -join [Environment]::NewLine)
+            Assert-Equal 0 $exitCode "Path registration must succeed in: $dirName. Output:`n$outputText"
+            $store = [IO.File]::ReadAllText($storePath)
+            Assert-Match $store ([regex]::Escape($target)) "The store must contain the registered dir: $dirName"
+            Assert-Match $store ([regex]::Escape('C:\other\tool')) "Earlier entries must be preserved: $dirName"
         }
     }
 
