@@ -22,7 +22,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $scriptDir 'dsh-service-health.ps1')
 $stateHelper = Join-Path $scriptDir 'dsh-launch-state.ps1'
 
-# --doctor / --check 的诊断契约（阶段 D）：
+# --check 的诊断契约（阶段 D）：
 #   一次看清“为什么不能启动、当前运行哪个版本”。只读诊断：不读取用户配置
 #   内容、不导出完整环境变量、不访问 .dsh、不启动服务、不打开浏览器。
 #   退出码：0 = 未发现阻断性问题；1 = 发现至少一项需要处理的问题。
@@ -46,7 +46,7 @@ function Assert-DshDoctorProblem {
     }
 }
 
-Write-Host 'DeepSeek Harness 启动器诊断（deepseek --doctor）'
+Write-Host 'DeepSeek Harness 启动器诊断（deepseek --check）'
 
 # —— 1. 启动器安装 ——
 Write-DshDoctorSection '启动器安装'

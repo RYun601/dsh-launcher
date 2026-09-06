@@ -53,8 +53,7 @@ jobs:
       - name: Validate cmd flags and log dir logic
         shell: bash
         run: |
-          grep -q -- '--daemon' deepseek.cmd || { echo "::error::deepseek.cmd missing --daemon"; exit 1; }
-          grep -q -- '/c:"^-d\$"' deepseek.cmd || { echo "::error::deepseek.cmd missing -d alias"; exit 1; }
+          grep -q -- '/c:"\^-b\$"' deepseek.cmd || { echo "::error::deepseek.cmd missing -b background dispatch"; exit 1; }
           grep -q 'New-Item -ItemType Directory' background-run.ps1 || { echo "::error::background-run.ps1 missing log dir creation"; exit 1; }
           grep -q -- '-WaitForReady -TimeoutSeconds 900' start-background.cmd || { echo "::error::start-background.cmd missing interactive wait mode"; exit 1; }
           grep -q -- 'set-shortcut.ps1' install.ps1 || { echo "::error::install.ps1 missing shortcut migration helper"; exit 1; }

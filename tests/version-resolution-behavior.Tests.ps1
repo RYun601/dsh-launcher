@@ -283,7 +283,8 @@ try {
             $exitCode = $LASTEXITCODE
             $outputText = [string]($output -join [Environment]::NewLine)
             Assert-Equal 0 $exitCode "Version query must succeed in: $dirName. Output:`n$outputText"
-            Assert-Match $outputText 'dsh-launcher 0\.1\.11' "The launcher version must be reported in: $dirName"
+            $launcherVersion = (Get-Content -LiteralPath (Join-Path $repoRoot 'VERSION') -Raw).Trim()
+            Assert-Match $outputText ('dsh-launcher ' + [regex]::Escape($launcherVersion)) "The launcher version must be reported in: $dirName"
             Assert-NotMatch $outputText 'ParserError|Exception' "No parse errors may appear in: $dirName"
         }
     }
