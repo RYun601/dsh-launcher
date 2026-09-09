@@ -1,4 +1,13 @@
-﻿# —— 控制台编码修复 ——
+﻿param(
+    # 回退模式：显式指定目标已发布版本（必须低于当前活动版本）。
+    [string]$TargetVersion,
+    # 只读列表模式：打印当前活动版本与 npm 已发布版本后退出，不做任何修改。
+    [switch]$ListVersions,
+    # 列表显示数量：0 表示显示全部，正整数表示显示最近 N 个；缺省 20。
+    [int]$ListCount = 20
+)
+
+# —— 控制台编码修复 ——
 # 在代码页被切到 UTF-8(65001) 的传统控制台里，中文输出会出现“每个字重复”的重影 bug。
 # 这里把控制台代码页与输出编码统一回系统 ANSI 代码页（中文系统为 936/GBK）。
 try {
@@ -18,20 +27,78 @@ $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $dir 'dsh-runtime-layout.ps1')
 . (Join-Path $dir 'dsh-maintenance-lock.ps1')
 
+# 只读列表模式：不检查 Node、不加维护锁、不停服，用于挑选回退目标版本。
+if ($ListVersions) {
+    if ($TargetVersion) {
+        Write-Host '[ERROR] 列表模式不接受目标版本参数；请单独使用 -ListVersions 或 -TargetVersion。'
+        exit 1
+    }
+    if ($ListCount -lt 0) {
+        Write-Host "[ERROR] 无效的显示数量：$ListCount（0 表示显示全部，正整数表示显示最近 N 个）。"
+        exit 1
+    }
+    $listLayout = Get-DshRuntimeLayout -LaunchRoot (Join-Path $env:USERPROFILE 'dsh-launch')
+    $listReport = Get-DshRuntimeVersionReport -Layout $listLayout
+    Write-Host "当前活动版本（active version）：$($listReport.ActiveVersion)"
+    Write-Host 'npm 已发布版本（published versions，新 → 旧）：'
+    $publishedList = @(& (Join-Path $dir 'resolve-dsh-version.ps1') -ListPublished)
+    if ($publishedList.Count -eq 0) {
+        Write-Host '  （无法获取已发布版本列表，请检查网络或 DSH_REGISTRY 配置）'
+        exit 0
+    }
+    if ($ListCount -gt 0 -and $publishedList.Count -gt $ListCount) {
+        $publishedList | Select-Object -First $ListCount | ForEach-Object { Write-Host "  $_" }
+        Write-Host "…… 共 $($publishedList.Count) 个已发布版本（published versions，仅显示最近 $ListCount 个）；完整列表：npm view @deepseek-ai/dsh versions"
+    } else {
+        $publishedList | ForEach-Object { Write-Host "  $_" }
+    }
+    exit 0
+}
+
 # 0) Node.js 版本前置检查：不满足要求时直接失败，不触碰正在运行的服务。
 if (-not (Assert-DshNodeEnvironment)) { exit 1 }
 
-# 1) 目标版本 = 各 dist-tag（latest/next/...）中的最高者（当前 next=0.1.0-rc.8）。
+# 1) 目标版本：显式指定时为回退模式（只允许降级），否则取各 dist-tag（latest/next/...）中的最高者。
 #    必须先成功解析并校验版本，才允许停止服务或清理任何东西。
-$latest = & (Join-Path $dir 'resolve-dsh-version.ps1')
-if (-not $latest) {
-    Write-Host '[ERROR] 无法解析目标 DSH 版本，升级已取消（upgrade aborted）；当前安装未被更改。'
-    exit 1
-}
-$targetVersion = [string]$latest
-if (-not (ConvertTo-DshSemVer $targetVersion)) {
-    Write-Host "[ERROR] 解析到的目标版本无效：$targetVersion，升级已取消（upgrade aborted）；当前安装未被更改。"
-    exit 1
+if ($TargetVersion) {
+    $targetVersion = [string]$TargetVersion
+    if (-not (ConvertTo-DshSemVer $targetVersion)) {
+        Write-Host "[ERROR] 指定的回退版本无效：$targetVersion，回退已取消（rollback aborted）；当前安装未被更改。"
+        exit 1
+    }
+    $publishedVersions = @(& (Join-Path $dir 'resolve-dsh-version.ps1') -ListPublished)
+    if (@($publishedVersions | Where-Object { [string]$_ -eq $targetVersion }).Count -eq 0) {
+        Write-Host "[ERROR] 版本 $targetVersion 不在 npm 已发布版本列表中，回退已取消（rollback aborted）；当前安装未被更改。"
+        exit 1
+    }
+    # 降级方向校验：本地版本未知时不能解释为可回退，必须先能确定当前版本（R13）。
+    $rollbackLayout = Get-DshRuntimeLayout -LaunchRoot (Join-Path $env:USERPROFILE 'dsh-launch')
+    $rollbackReport = Get-DshRuntimeVersionReport -Layout $rollbackLayout
+    $activeVersion = [string]$rollbackReport.ActiveVersion
+    if (-not $activeVersion -or $activeVersion -eq 'unknown') {
+        Write-Host '[ERROR] 当前活动版本未知，无法校验回退方向；请先正常启动一次，或改用 deepseek --upgrade。回退已取消（rollback aborted）；当前安装未被更改。'
+        exit 1
+    }
+    $rollbackDirection = Compare-DshVersion $targetVersion $activeVersion
+    if ($rollbackDirection -gt 0) {
+        Write-Host "[ERROR] 目标版本 $targetVersion 高于当前版本 $activeVersion，回退只允许降级；如需升级请使用 deepseek --upgrade。回退已取消（rollback aborted）；当前安装未被更改。"
+        exit 1
+    }
+    if ($rollbackDirection -eq 0) {
+        Write-Host "当前运行时已是版本 $activeVersion，无需回退（already at target）。"
+        exit 0
+    }
+} else {
+    $latest = & (Join-Path $dir 'resolve-dsh-version.ps1')
+    if (-not $latest) {
+        Write-Host '[ERROR] 无法解析目标 DSH 版本，升级已取消（upgrade aborted）；当前安装未被更改。'
+        exit 1
+    }
+    $targetVersion = [string]$latest
+    if (-not (ConvertTo-DshSemVer $targetVersion)) {
+        Write-Host "[ERROR] 解析到的目标版本无效：$targetVersion，升级已取消（upgrade aborted）；当前安装未被更改。"
+        exit 1
+    }
 }
 Write-Host "目标版本：$targetVersion"
 
@@ -55,9 +122,23 @@ if ($oldRuntime -and -not $oldRuntimeReady) {
     Write-Host "[WARN] 当前运行时未通过就绪校验（$($oldRuntime.Version)），升级回退将尝试其他可用运行时。"
 }
 
-if ($oldRuntimeReady -and (Compare-DshVersion $oldRuntime.Version $targetVersion) -ge 0) {
-    Write-Host "当前运行时已是最新版本：$($oldRuntime.Version)，无需升级（already latest）。"
-    exit 0
+# 方向感知守卫：升级模式在“已最新”时空操作；回退模式在“已是目标”时空操作、
+# 在“当前低于目标”时拒绝（防锁前校验与事务之间的状态变化）。
+if ($oldRuntimeReady) {
+    $versionCompare = Compare-DshVersion $oldRuntime.Version $targetVersion
+    if ($TargetVersion) {
+        if ($versionCompare -eq 0) {
+            Write-Host "当前运行时已是版本：$($oldRuntime.Version)，无需回退（already at target）。"
+            exit 0
+        }
+        if ($versionCompare -lt 0) {
+            Write-Host '[ERROR] 当前运行时版本低于回退目标，回退已取消（rollback aborted）；当前安装未被更改。'
+            exit 1
+        }
+    } elseif ($versionCompare -ge 0) {
+        Write-Host "当前运行时已是最新版本：$($oldRuntime.Version)，无需升级（already latest）。"
+        exit 0
+    }
 }
 
 $candidate = New-DshRuntimeCandidate -Layout $layout -Version $targetVersion
@@ -100,10 +181,10 @@ if ($removed) {
     Write-Host '未发现 npx 缓存中的 DSH 工作区'
 }
 
-# 3) 同步 npm 全局安装的 `dsh` 命令：缺失时安装、旧于目标版本时升级，
-# 保证直接使用 `dsh web` 等命令的版本与 launcher 运行时一致。
-# 失败仅警告，不阻塞 launcher 运行时本身的升级。
-if ($latest) {
+# 3) 同步 npm 全局安装的 `dsh` 命令：缺失时安装、与目标版本不一致时重装
+#    （含回退时把较新的全局命令降级），保证直接使用 `dsh web` 等命令的版本
+#    与 launcher 运行时一致。失败仅警告，不阻塞 launcher 运行时本身。
+if ($targetVersion) {
     $globalPkg = Join-Path $env:APPDATA 'npm\node_modules\@deepseek-ai\dsh\package.json'
     $globalVersion = ''
     if (Test-Path -LiteralPath $globalPkg) {
@@ -111,22 +192,22 @@ if ($latest) {
             $globalVersion = [string](Get-Content -LiteralPath $globalPkg -Raw -Encoding UTF8 | ConvertFrom-Json).version
         } catch { }
     }
-    if (-not $globalVersion -or (Compare-DshVersion $globalVersion $latest) -lt 0) {
+    if (-not $globalVersion -or (Compare-DshVersion $globalVersion $targetVersion) -ne 0) {
         if ($globalVersion) {
-            Write-Host "正在升级全局 dsh 命令（$globalVersion -> $latest）..."
+            Write-Host "正在同步全局 dsh 命令（$globalVersion -> $targetVersion）..."
         } else {
-            Write-Host "正在安装全局 dsh 命令（$latest）..."
+            Write-Host "正在安装全局 dsh 命令（$targetVersion）..."
         }
         try {
-            & npm.cmd install -g "@deepseek-ai/dsh@$latest"
+            & npm.cmd install -g "@deepseek-ai/dsh@$targetVersion"
             if ($LASTEXITCODE -ne 0) { throw "npm install -g 退出码 $LASTEXITCODE" }
-            Write-Host "全局 dsh 已就绪（$latest），现在可直接使用 dsh 命令。"
+            Write-Host "全局 dsh 已就绪（$targetVersion），现在可直接使用 dsh 命令。"
         } catch {
             Write-Host "警告：全局 dsh 安装/升级失败：$($_.Exception.Message)"
-            Write-Host "可手动执行：npm install -g @deepseek-ai/dsh@$latest"
+            Write-Host "可手动执行：npm install -g @deepseek-ai/dsh@$targetVersion"
         }
     } else {
-        Write-Host "全局 dsh 已是最新（$globalVersion）。"
+        Write-Host "全局 dsh 已与目标版本一致（$globalVersion）。"
     }
 }
 

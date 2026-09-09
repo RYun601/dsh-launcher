@@ -436,8 +436,15 @@ function Invoke-ReservedRealBackgroundRunner {
 
     while (-not $process.HasExited) {
         if (Test-Path -LiteralPath $statePath) {
-            $currentState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-            if ($currentState.Message -and -not $startupMessages.Contains([string]$currentState.Message)) {
+            # The runner deletes its state file during cleanup; losing that
+            # race (missing file or a partial read) just means there is
+            # nothing new to collect this cycle.
+            try {
+                $currentState = Get-Content -LiteralPath $statePath -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+            } catch {
+                $currentState = $null
+            }
+            if ($currentState -and $currentState.Message -and -not $startupMessages.Contains([string]$currentState.Message)) {
                 $startupMessages.Add([string]$currentState.Message)
             }
         }
@@ -905,6 +912,51 @@ try {
         Assert-Match $result.Output 'upgrade-dsh\.ps1' 'The upgrade command should still dispatch to the upgrade script'
     }
 
+    Invoke-Test '--rollback accepts one semver token and dispatches it to the upgrade script' {
+        $result = Invoke-DeepseekCommand -Argument '--rollback 0.1.1-rc.2'
+        Assert-Equal 0 $result.ExitCode 'A valid rollback token should dispatch normally'
+        Assert-Match $result.ProcessLog 'upgrade-dsh\.ps1.*-TargetVersion 0\.1\.1-rc\.2(?:\s|$)' `
+            'The requested rollback version must reach the upgrade script'
+    }
+
+    Invoke-Test '--rollback rejects non-version tokens, bare versions, and conflicting actions' {
+        foreach ($argument in @('--rollback notaversion', '--rollback 1.2', '0.1.1-rc.2', '--rollback --stop')) {
+            $result = Invoke-DeepseekCommand -Argument $argument
+            Assert-Equal 1 $result.ExitCode "Invalid rollback placement must fail: $argument"
+            Assert-Match $result.Output 'Unknown argument|Conflicting actions' "The error must be actionable: $argument"
+            Assert-Match $result.Output 'Usage:' "The error must print the help block: $argument"
+            Assert-NotMatch $result.ProcessLog 'upgrade-dsh\.ps1|stop-dsh\.ps1' "Invalid input must not dispatch: $argument"
+        }
+    }
+
+    Invoke-Test '--rollback accepts an optional display count for the version listing' {
+        $withCount = Invoke-DeepseekCommand -Argument '--rollback 20'
+        Assert-Equal 0 $withCount.ExitCode 'A numeric rollback count should dispatch normally'
+        Assert-Match $withCount.ProcessLog 'upgrade-dsh\.ps1.*-ListVersions.*-ListCount 20(?:\s|$)' `
+            'The listing count must reach the upgrade script'
+
+        $zero = Invoke-DeepseekCommand -Argument '--rollback 0'
+        Assert-Equal 0 $zero.ExitCode 'A zero rollback count should dispatch normally'
+        Assert-Match $zero.ProcessLog 'upgrade-dsh\.ps1.*-ListVersions.*-ListCount 0(?:\s|$)' `
+            'A zero count must request the full version list'
+    }
+
+    Invoke-Test '--rollback rejects combining the display count with a version token' {
+        foreach ($argument in @('--rollback 20 30', '--rollback 0.1.1-rc.2 20', '--rollback 20 0.1.1-rc.2')) {
+            $result = Invoke-DeepseekCommand -Argument $argument
+            Assert-Equal 1 $result.ExitCode "Invalid count placement must fail: $argument"
+            Assert-Match $result.Output 'Unknown argument' "The error must be actionable: $argument"
+            Assert-NotMatch $result.ProcessLog 'upgrade-dsh\.ps1' "Invalid input must not dispatch: $argument"
+        }
+    }
+
+    Invoke-Test 'help text documents both rollback forms' {
+        $result = Invoke-DeepseekCommand -Argument '--help'
+        Assert-Equal 0 $result.ExitCode 'help should exit successfully'
+        Assert-Match $result.Output 'deepseek --rollback ' 'help must document the version listing form'
+        Assert-Match $result.Output 'deepseek --rollback VERSION' 'help must document the rollback target form'
+    }
+
     Invoke-Test 'foreground launch uses the prepared DSH runtime' {
         $result = Invoke-DeepseekCommand -Argument ''
         Assert-Equal 0 $result.ExitCode 'The fake foreground DSH command should exit successfully'
@@ -976,6 +1028,9 @@ try {
             [pscustomobject]@{ Argument = '--logs --follow 50'; ExpectedLog = 'dsh-logs\.ps1.*-Count 50.*-Follow' },
             [pscustomobject]@{ Argument = '--logs 50'; ExpectedLog = 'dsh-logs\.ps1.*-Count 50(?:\s|$)' },
             [pscustomobject]@{ Argument = '--upgrade'; ExpectedLog = 'upgrade-dsh\.ps1' },
+            [pscustomobject]@{ Argument = '--rollback'; ExpectedLog = 'upgrade-dsh\.ps1.*-ListVersions' },
+            [pscustomobject]@{ Argument = '--rollback 20'; ExpectedLog = 'upgrade-dsh\.ps1.*-ListVersions.*-ListCount 20(?:\s|$)' },
+            [pscustomobject]@{ Argument = '--rollback 0.1.1-rc.2'; ExpectedLog = 'upgrade-dsh\.ps1.*-TargetVersion 0\.1\.1-rc\.2(?:\s|$)' },
             [pscustomobject]@{ Argument = '--update'; ExpectedLog = 'update-check\.ps1' },
             [pscustomobject]@{ Argument = '--version'; ExpectedLog = 'version-info\.ps1' },
             [pscustomobject]@{ Argument = '--update-launcher'; ExpectedLog = 'update-launcher\.ps1' },

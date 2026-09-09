@@ -128,6 +128,24 @@ function global:Get-CimInstance {
     if ($env:DSH_STOP_TEST_OWNER_SCRIPT) {
         $ownerScriptPath = Join-Path $env:DSH_STOP_TEST_FAKES $env:DSH_STOP_TEST_OWNER_SCRIPT
     }
+    if ($scenario -like 'lock-owner-*' -and $queriedPid -eq [int]$env:DSH_STOP_OWNER_PID) {
+        # 复现真实事故：服务被杀后 runner 自行优雅收尾，在锁检查（第一次
+        # 探测，看到 ALIVE）与身份校验（第二次探测）之间已经消失。第二次
+        # 探测的两个形态：GONE（进程退出）与 OTHER（PID 已被无关进程复用，
+        # R8：绝不能终止复用 PID）。计数走环境变量，避免跨脚本作用域歧义。
+        $env:DSH_STOP_LOCK_OWNER_PROBES = [string]([int]$env:DSH_STOP_LOCK_OWNER_PROBES + 1)
+        if ([int]$env:DSH_STOP_LOCK_OWNER_PROBES -ge 2) {
+            if ($scenario -eq 'lock-owner-pid-reused-after-lock-check') {
+                return [pscustomobject]@{
+                    ProcessId      = $queriedPid
+                    Name           = 'notepad.exe'
+                    ExecutablePath = 'C:\Windows\System32\notepad.exe'
+                    CommandLine    = '"C:\Windows\System32\notepad.exe" C:\notes\todo.txt'
+                }
+            }
+            return $null
+        }
+    }
     if ($scenario -eq 'runner-service-distinct' -and $queriedPid -eq $servicePid) {
         return [pscustomobject]@{
             ProcessId       = $queriedPid
@@ -245,6 +263,7 @@ function Invoke-StopScenario {
     $previousGone = $env:DSH_STOP_PROCESS_GONE
     $previousServicePid = $env:DSH_STOP_SERVICE_PID
     $previousOwnerScript = $env:DSH_STOP_TEST_OWNER_SCRIPT
+    $previousLockProbes = $env:DSH_STOP_LOCK_OWNER_PROBES
     $previousErrorActionPreference = $ErrorActionPreference
     try {
         New-Item -ItemType Directory -Force -Path $launchRoot | Out-Null
@@ -261,6 +280,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_TASKKILL_FAILS_BUT_RELEASES = $TaskkillFailsButReleases
         $env:DSH_STOP_TEST_OWNER_SCRIPT = $OwnerScript
         $env:DSH_STOP_PROCESS_GONE = '0'
+        $env:DSH_STOP_LOCK_OWNER_PROBES = '0'
         $env:DSH_STOP_OWNER_PID = [string]$PID
         $env:DSH_STOP_SERVICE_PID = [string]($PID + 1000)
         New-IdentityStartupLock
@@ -289,6 +309,7 @@ function Invoke-StopScenario {
         $env:DSH_STOP_PROCESS_GONE = $previousGone
         $env:DSH_STOP_SERVICE_PID = $previousServicePid
         $env:DSH_STOP_TEST_OWNER_SCRIPT = $previousOwnerScript
+        $env:DSH_STOP_LOCK_OWNER_PROBES = $previousLockProbes
         $ErrorActionPreference = $previousErrorActionPreference
         if (Test-Path -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock')) {
             Remove-Item -LiteralPath (Join-Path $launchRoot 'dsh-startup.lock') -Recurse -Force
@@ -318,6 +339,25 @@ try {
     Invoke-Test 'a taskkill race succeeds when the verified process has already exited' {
         $result = Invoke-StopScenario -Scenario 'locked-runner' -TaskkillExit '5' -TaskkillFailsButReleases '1'
         Assert-Equal 0 $result.ExitCode 'A process that exits during taskkill must not make stop fail'
+    }
+
+    Invoke-Test 'a lock owner that exits between the lock check and the identity probe is not a stop failure' {
+        # 真实事故复现：服务 PID 被杀后 runner 自行优雅收尾；锁检查仍看到
+        # LOCKED，但身份校验时 runner 已退出。没有可停止的进程就是成功，
+        # 不能报“停止命令失败”让升级/回退事务误中止。
+        $result = Invoke-StopScenario -Scenario 'lock-owner-exits-after-lock-check'
+        Assert-Equal 0 $result.ExitCode "A lock owner that already exited must not fail the stop. Output:`n$($result.Output)"
+        Assert-NotMatch $result.Output 'stop failed' 'The race must not be reported as a stop failure'
+        Assert-Equal '' $result.KillLog 'An already-exited lock owner must never be taskkilled'
+    }
+
+    Invoke-Test 'a recycled lock owner PID running an unrelated program is not a stop failure' {
+        # 同一竞态的 PID 复用形态：身份校验看到的是复用 PID 的无关进程。
+        # 必须按“无可停止目标”成功处理，绝不能终止复用 PID（R8）。
+        $result = Invoke-StopScenario -Scenario 'lock-owner-pid-reused-after-lock-check'
+        Assert-Equal 0 $result.ExitCode "A recycled lock owner PID must not fail the stop. Output:`n$($result.Output)"
+        Assert-NotMatch $result.Output 'stop failed' 'The recycled PID must not be reported as a stop failure'
+        Assert-Equal '' $result.KillLog 'A recycled PID running an unrelated program must never be taskkilled'
     }
 
     Invoke-Test 'a CIM query failure after taskkill is not reported as a successful stop' {
