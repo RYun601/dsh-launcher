@@ -89,16 +89,40 @@ function Get-DshLauncherProcessState {
 }
 
 function Stop-DshProcessTree {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        # 锁分支专用：身份校验不是 ALIVE 时按“目标已停止”成功处理。
+        [switch]$TreatMissingAsStopped
+    )
 
-    if ((Get-DshLauncherProcessState -ProcessId $ProcessId) -ne 'ALIVE') { return $false }
-    & taskkill.exe /PID $ProcessId /T /F 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    if ((Get-DshLauncherProcessState -ProcessId $ProcessId) -ne 'ALIVE') {
+        # 端口分支：非 ALIVE 意味着占用者不是 DSH 启动链进程，不停止。
+        # 锁分支：服务 PID 被终止后 runner 会自行优雅收尾；在锁检查与身份
+        # 校验之间它可能已经退出（GONE），或其 PID 已被无关新进程复用
+        # （OTHER）。两者都没有可停止的 DSH 进程，按“目标已停止”处理；
+        # 复用 PID 的无关进程绝不能终止（R8）。
+        if ($TreatMissingAsStopped) { return $true }
+        return $false
+    }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $taskkillOutput = @()
+    $taskkillExitCode = 0
+    try {
+        $ErrorActionPreference = 'Continue'
+        $taskkillOutput = @(& taskkill.exe /PID $ProcessId /T /F 2>&1)
         $taskkillExitCode = $LASTEXITCODE
-        # 先杀服务 PID 可能会让 runner 进入正常收尾；在这个短窗口内，
+    } catch {
+        $taskkillOutput = @([string]$_.Exception.Message)
+        $taskkillExitCode = 1
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($taskkillExitCode -ne 0) {
+        # 先杀服务 PID 可能会让 runner 进入正常收尾；在这个窗口内，
         # taskkill 会返回失败但 runner 仍暂时可被查询。等待身份消失后再
-        # 判定为竞态成功，真正仍存活的 runner 仍会按失败处理。
-        $raceDeadline = [DateTime]::UtcNow.AddMilliseconds([Math]::Min(1000, $WaitTimeoutMilliseconds))
+        # 判定为竞态成功，真正仍存活的 runner 仍会按失败处理。窗口与
+        # WaitTimeout 对齐：繁忙机器上单次身份探测（CIM）可达秒级。
+        $raceDeadline = [DateTime]::UtcNow.AddMilliseconds($WaitTimeoutMilliseconds)
         while ($true) {
             if ((Get-DshLauncherProcessState -ProcessId $ProcessId) -eq 'GONE') {
                 $global:LASTEXITCODE = 0
@@ -106,6 +130,9 @@ function Stop-DshProcessTree {
             }
             if ([DateTime]::UtcNow -ge $raceDeadline) { break }
             Start-Sleep -Milliseconds 50
+        }
+        foreach ($line in @($taskkillOutput | ForEach-Object { [string]$_ })) {
+            if ($line) { Write-Host "taskkill /PID ${ProcessId}: $line" }
         }
         Write-Host "[ERROR] 结束 DSH 进程失败：taskkill /PID $ProcessId 返回退出码 $taskkillExitCode。"
         return 'failed'
@@ -134,7 +161,7 @@ $lockStatus = @(& $stateHelper -Action TestStartupLock -LaunchRoot $launchRoot)
 if ($LASTEXITCODE -eq 0 -and [string]($lockStatus -join '') -match '^LOCKED\s+(\d+)') {
     $startupOwner = [int]$Matches[1]
     if ($stopped -notcontains $startupOwner -and $killedFailures -notcontains $startupOwner) {
-        if ((Stop-DshProcessTree -ProcessId $startupOwner) -eq $true) {
+        if ((Stop-DshProcessTree -ProcessId $startupOwner -TreatMissingAsStopped) -eq $true) {
             $stopped += $startupOwner
         } else {
             $killedFailures += $startupOwner
