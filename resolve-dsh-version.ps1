@@ -1,6 +1,8 @@
 param(
     [switch]$PreferLocalRuntime,
-    [string]$RuntimeRoot
+    [string]$RuntimeRoot,
+    # List mode: print every published @deepseek-ai/dsh version, newest first.
+    [switch]$ListPublished
 )
 
 # Prints the highest published version across all npm dist-tags (latest, next, ...).
@@ -8,6 +10,56 @@ param(
 $ErrorActionPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'dsh-version.ps1')
 . (Join-Path $PSScriptRoot 'dsh-runtime-layout.ps1')
+
+if ($ListPublished) {
+    # Registry fast path: the abbreviated packument (corgi doc) carries the
+    # full version table with minimal per-version metadata. The registry
+    # defaults to the npm public registry; DSH_REGISTRY can point at a mirror.
+    # `npm view` remains the fallback so custom registry config, proxies, and
+    # auth keep working.
+    $registry = if ($env:DSH_REGISTRY) { [string]$env:DSH_REGISTRY } else { 'https://registry.npmjs.org' }
+    $registry = $registry.TrimEnd('/')
+    $allVersions = @()
+    if ($registry) {
+        try {
+            $document = Invoke-RestMethod -Uri "$registry/@deepseek-ai%2Fdsh" `
+                -Headers @{ Accept = 'application/vnd.npm.install-v1+json' } `
+                -TimeoutSec 8 -ErrorAction Stop
+            $allVersions = @($document.versions.PSObject.Properties.Name)
+        } catch {
+            $allVersions = @()
+        }
+    }
+    if (-not $allVersions) {
+        try {
+            $allVersions = @(npm view @deepseek-ai/dsh versions --json 2>$null | ConvertFrom-Json)
+        } catch {
+            $allVersions = @()
+        }
+    }
+    # Sort newest first with the shared semver comparator (string sort would
+    # misorder prerelease identifiers such as rc.2 vs rc.10).
+    $sortedVersions = @()
+    foreach ($candidate in @($allVersions | Where-Object { $_ })) {
+        $insertedAt = -1
+        for ($index = 0; $index -lt $sortedVersions.Count; $index++) {
+            if ((Compare-DshVersion $candidate ([string]$sortedVersions[$index])) -gt 0) {
+                $insertedAt = $index
+                break
+            }
+        }
+        if ($insertedAt -lt 0) {
+            $sortedVersions = @($sortedVersions) + @($candidate)
+        } else {
+            $before = @()
+            if ($insertedAt -gt 0) { $before = @($sortedVersions[0..($insertedAt - 1)]) }
+            $after = @($sortedVersions[$insertedAt..($sortedVersions.Count - 1)])
+            $sortedVersions = @($before + @($candidate) + $after)
+        }
+    }
+    $sortedVersions | ForEach-Object { Write-Output $_ }
+    exit 0
+}
 
 if (-not $RuntimeRoot) {
     $RuntimeRoot = Join-Path $env:USERPROFILE 'dsh-launch\runtime'

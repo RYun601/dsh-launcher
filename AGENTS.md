@@ -36,7 +36,7 @@
 - `update-launcher.ps1`：启动器自更新（`--update-launcher` 查询 / `--upgrade-launcher` 执行）：下载并校验 GitHub 发行包（SHA-256 + 包内清单）、维护互斥、目录级事务替换与失败恢复。
 - `dsh-doctor.ps1`：`deepseek --check` 的只读环境诊断，问题状态以非零码退出。
 - `dsh-logs.ps1`：`deepseek --logs` 的查看与跟随实现；基于路径轮询，轮转后自动重连。
-- `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、同步全局 `dsh` 命令（缺失则安装、旧版则升级）、准备新运行时并重新后台启动。
+- `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、同步全局 `dsh` 命令（与目标版本保持一致，含回退降级）、准备新运行时并重新后台启动；支持 `-TargetVersion` 回退到指定已发布版本（仅允许降级）与 `-ListVersions` 只读版本列表。
 
 ### 安装与维护
 

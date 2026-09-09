@@ -20,6 +20,8 @@ rem launch and --full cannot be lost on its way to the uninstaller.
 set "ACTION="
 set "FULL="
 set "LOG_COUNT="
+set "ROLLBACK_VERSION="
+set "ROLLBACK_COUNT="
 set "BADARG="
 set "CONFLICT="
 if defined ARGS (
@@ -72,6 +74,11 @@ if /i "%ACTION%"=="logs" (
 )
 if /i "%ACTION%"=="upgrade" (
     call :upgrade
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="rollback" (
+    call :rollback
     set "DSH_RC=!ERRORLEVEL!"
     exit /b !DSH_RC!
 )
@@ -157,6 +164,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1"
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
+:rollback
+rem A semver token following --rollback selects the rollback target; a numeric
+rem token caps the read-only version listing (0 = all). Without either, the
+rem upgrade script lists the newest 20 published versions.
+if defined ROLLBACK_VERSION (
+    echo Rolling DeepSeek Harness back to version %ROLLBACK_VERSION% ...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1" -TargetVersion "%ROLLBACK_VERSION%"
+) else if defined ROLLBACK_COUNT (
+    echo Listing current and published DeepSeek Harness versions...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1" -ListVersions -ListCount "%ROLLBACK_COUNT%"
+) else (
+    echo Listing current and published DeepSeek Harness versions...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0upgrade-dsh.ps1" -ListVersions
+)
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
+
 :update
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-check.ps1"
 set "DSH_RC=%ERRORLEVEL%"
@@ -208,6 +232,8 @@ echo   deepseek --logs --follow [N]  follow the log and reconnect across rotatio
 echo   deepseek --version      show launcher and DeepSeek Harness versions
 echo   deepseek --update       check for a newer DeepSeek Harness version
 echo   deepseek --upgrade      stop, clear cache, restart with the latest version
+echo   deepseek --rollback         list current and published versions (default: 20 newest, 0 = all)
+echo   deepseek --rollback VERSION roll back to a published version older than the current one
 echo   deepseek --update-launcher    check for a newer launcher release on GitHub
 echo   deepseek --upgrade-launcher   download, verify and update this launcher install
 echo   deepseek --uninstall    remove this command from PATH
@@ -236,11 +262,32 @@ if /i "%CLASSIFY_TOKEN%"=="--full" (
     set "FULL=1"
     goto :eof
 )
+rem A pure numeric token is a --logs line count or a --rollback listing count;
+rem anything else keeps it an unknown argument.
 echo(%CLASSIFY_TOKEN%| findstr /r /c:"^[0-9][0-9]*$" >nul 2>&1
 if not errorlevel 1 (
-    if /i not "%ACTION%"=="logs" set "BADARG=%CLASSIFY_TOKEN%"
-    if defined LOG_COUNT set "BADARG=%CLASSIFY_TOKEN%"
-    set "LOG_COUNT=%CLASSIFY_TOKEN%"
+    if /i "%ACTION%"=="logs" (
+        if defined LOG_COUNT set "BADARG=%CLASSIFY_TOKEN%"
+        set "LOG_COUNT=%CLASSIFY_TOKEN%"
+        goto :eof
+    )
+    if /i "%ACTION%"=="rollback" (
+        if defined ROLLBACK_COUNT set "BADARG=%CLASSIFY_TOKEN%"
+        if defined ROLLBACK_VERSION set "BADARG=%CLASSIFY_TOKEN%"
+        set "ROLLBACK_COUNT=%CLASSIFY_TOKEN%"
+        goto :eof
+    )
+    set "BADARG=%CLASSIFY_TOKEN%"
+    goto :eof
+)
+rem A semver-shaped token is only valid as the --rollback target version;
+rem the PowerShell side revalidates it as a real published version.
+echo(%CLASSIFY_TOKEN%| findstr /r /c:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*" >nul 2>&1
+if not errorlevel 1 (
+    if /i not "%ACTION%"=="rollback" set "BADARG=%CLASSIFY_TOKEN%"
+    if defined ROLLBACK_VERSION set "BADARG=%CLASSIFY_TOKEN%"
+    if defined ROLLBACK_COUNT set "BADARG=%CLASSIFY_TOKEN%"
+    set "ROLLBACK_VERSION=%CLASSIFY_TOKEN%"
     goto :eof
 )
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^-b$" >nul 2>&1
@@ -267,6 +314,8 @@ if not errorlevel 1 (
 )
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--upgrade$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=upgrade"
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--rollback$" >nul 2>&1
+if not errorlevel 1 set "CLASSIFY_THIS=rollback"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--update$" /c:"^update$" >nul 2>&1
 if not errorlevel 1 set "CLASSIFY_THIS=update"
 echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--update-launcher$" >nul 2>&1

@@ -80,7 +80,7 @@ cd dsh-launcher
 
 ## 命令行用法
 
-每次调用只允许一个动作，出现未知参数或冲突组合时直接报错退出，不会静默回落到前台启动；PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。`--full` 只能与 `--uninstall` 组合使用；数字只允许紧跟在 `--logs` 后作为唯一的行数，`--json` 只允许跟随 `--status`，`--follow` 只允许跟随 `--logs`。
+每次调用只允许一个动作，出现未知参数或冲突组合时直接报错退出，不会静默回落到前台启动；PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。`--full` 只能与 `--uninstall` 组合使用；数字只允许紧跟在 `--logs` 后作为行数、或紧跟在 `--rollback` 后作为版本列表的显示数量，`--json` 只允许跟随 `--status`，`--follow` 只允许跟随 `--logs`，版本号（形如 `0.1.1-rc.2`）只允许跟随 `--rollback`。
 
 ### 启动与停止
 
@@ -106,13 +106,16 @@ cd dsh-launcher
 | `deepseek --version` | 显示启动器版本与**当前活动**的 DeepSeek Harness 版本（优先读取 `runtime-current.json` 活动指针，指针缺失时回退旧版运行时目录，并标注其他非活动来源） |
 | `deepseek --update` | 对比**活动运行时**版本与 npm 上的最新版本，提示更新方法；本地版本无法确认或远端解析失败时以非零码退出，不会把“未知”当作“已是最新” |
 | `deepseek --upgrade` | 一键升级 DeepSeek Harness 运行时（流程与失败回退见下方说明） |
+| `deepseek --rollback` | 列出当前活动版本与 npm 上已发布的 DeepSeek Harness 版本（新 → 旧；默认显示最近 20 个，`deepseek --rollback 0` 显示全部，`deepseek --rollback N` 显示最近 N 个），用于挑选回退目标 |
+| `deepseek --rollback <版本>` | 回退到指定的已发布版本（仅允许低于当前活动版本；复用 `--upgrade` 的事务流程） |
 | `deepseek --update-launcher` | 查询 GitHub 上启动器的最新稳定发行版并与本地版本比较（只查询，不改文件） |
 | `deepseek --upgrade-launcher` | 自更新启动器：下载并校验 GitHub 发行包后事务式替换当前安装（流程与失败恢复见下方说明） |
 
 - 普通启动优先复用已经准备并校验过的本地 DSH 版本，存在可用本地运行时时不访问 npm；仅在没有可用运行时的首次启动或修复场景中准备依赖。使用 `deepseek --update` 从 npm 检查新版本，使用 `deepseek --upgrade` 安装并切换到新版本。
-- `deepseek --update` / `deepseek --upgrade` 默认直接查询 npm 公共 registry 的 dist-tags（比 `npm view` 更快）。如需使用镜像或私有 registry，可设置环境变量 `DSH_REGISTRY`（例如 `https://registry.npmmirror.com`）；该设置仅在查询远端发布版本时生效，不影响本地运行时启动。
+- `deepseek --update` / `deepseek --upgrade` / `deepseek --rollback` 默认直接查询 npm 公共 registry（dist-tags 或已发布版本列表，均比 `npm view` 更快）。如需使用镜像或私有 registry，可设置环境变量 `DSH_REGISTRY`（例如 `https://registry.npmmirror.com`）；该设置仅在查询远端发布版本时生效，不影响本地运行时启动。
 - `deepseek --upgrade` 的详细流程：先解析并校验目标版本，当前运行时健康且版本不低于目标版本时直接提示已是最新并退出（不停止服务、不执行 npm 操作）；否则停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动。候选版本因插件依赖 DSH 已移除的导出而启动失败时，会列出不兼容插件并询问是否从 `web` profile 移除；确认后使用目标版本的 `dsh plugin --profile web remove` 清理插件并重试候选运行时，拒绝或处理失败时依次尝试恢复当前、上一版或旧版可用运行时（只有通过就绪校验的运行时才会被用于回退）。
-- `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则升级到最新版，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。目标版本无法解析或格式非法时，升级会在停止服务之前直接中止，不会影响当前安装。
+- `deepseek --upgrade` 会同步 npm 全局的 `dsh` 命令：已安装则同步到目标版本，缺失则自动安装，保证直接使用 `dsh` 命令的版本与启动器一致；该步骤失败仅提示警告，不影响启动器运行时的升级。目标版本无法解析或格式非法时，升级会在停止服务之前直接中止，不会影响当前安装。
+- `deepseek --rollback <版本>` 的约束与流程：目标必须是 npm 上已发布的精确版本号，且低于当前活动版本；当前活动版本未知、目标版本未发布、格式非法或高于当前版本时，都会在停止服务之前直接中止，不会影响当前安装。回退复用 `--upgrade` 的事务（停止服务 → 清理旧 DSH npx 工作区 → 同步全局 `dsh` 命令 → 重新后台启动验证），并把全局 `dsh` 命令一并降级到目标版本；候选启动失败时的插件处理与运行时回退链与 `--upgrade` 一致。版本列表默认只显示最近 20 个，超出时末尾提示完整列表的查看方式；回退目标的校验始终使用完整版本列表，显示数量只影响打印。
 - `deepseek --upgrade-launcher` 的详细流程：校验发行包 SHA-256 与包清单 → 获取维护互斥锁 → 旧安装整目录备份 → 新版就位 → 离线烟雾验证 → 提交；服务运行中、DSH 升级进行中、源码工作树或非受管安装时拒绝执行；失败自动恢复旧版本（恢复未完成时保留备份与恢复脚本并以退出码 2 结束）。
 
 ### 诊断与卸载
