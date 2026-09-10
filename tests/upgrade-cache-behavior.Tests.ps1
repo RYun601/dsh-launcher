@@ -392,6 +392,33 @@ try {
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
     }
 
+    Invoke-Test 'normal upgrade accepts a newer resolved version after a rollback' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-after-rollback') `
+            -NpmLog (Join-Path $testRoot 'upgrade-after-rollback-npm.log') `
+            -ResolvedVersion '0.1.0-rc.8'
+        $launchDir = Join-Path $fixture.UserProfile 'dsh-launch'
+        $currentDir = Join-Path $launchDir 'runtime'
+        New-FakeReadyRuntimeAt -Root $currentDir -Version '0.1.0-rc.7'
+        $pointer = @{
+            SchemaVersion = 1
+            Current = @{ Path = 'runtime'; Version = '0.1.0-rc.7' }
+            Previous = $null
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $launchDir 'runtime-current.json'),
+            ($pointer | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture
+
+        Assert-Equal 0 $result.ExitCode "A normal upgrade after rollback should succeed. Output:`n$($result.Output)"
+        Assert-Match ([IO.File]::ReadAllText($fixture.StartLog)) 'VERSION=0\.1\.0-rc\.8' `
+            'A normal upgrade must treat the resolved latest version as an upgrade target'
+        Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.0-rc\.8$' `
+            'A normal upgrade must synchronize the global dsh command to the resolved target'
+    }
+
     Invoke-Test 'upgrade skips preparation and service restart when the current runtime is already latest' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-already-latest') `
             -NpmLog (Join-Path $testRoot 'upgrade-already-latest-npm.log')

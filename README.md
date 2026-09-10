@@ -14,7 +14,8 @@ Windows 下 [DeepSeek Harness](https://github.com/deepseek-ai/dsh) Web 的启动
 
 - **命令行启动**：在 cmd / PowerShell 中输入 `deepseek` 即可启动
 - **前台 / 后台双模式**：前台显示运行日志（关窗即停）；`deepseek -b` 提交后台启动后立即返回
-- **自动打开浏览器**：服务就绪后自动打开 http://127.0.0.1:3080，无需手动输入地址
+- **自动打开浏览器**：服务就绪后自动打开带认证的本地 Web 界面，无需手动输入地址
+- **跨浏览器重开**：`deepseek --open [default|edge|chrome|firefox|brave]` 使用当前认证 URL 在指定浏览器中打开
 - **快捷方式启动反馈**：显示启动进度，成功打开浏览器后自动关窗；失败时保留窗口与日志提示
 - **状态查询与停止**：`deepseek --status` 查看运行状态，`deepseek --stop` 一键停止并提示重启命令
 - **跨系统通用**：Win10 / Win11 均可使用
@@ -73,14 +74,14 @@ cd dsh-launcher
 
 1. 输入 `deepseek -b` 提交后台启动并立即返回（或输入 `deepseek` 前台启动）
 2. 首次运行会自动通过 npm 准备 DeepSeek Harness 运行时和必需依赖（需联网，约 1-2 分钟）
-3. 服务就绪后浏览器自动打开 http://127.0.0.1:3080
+3. 服务就绪后浏览器自动打开本地 Web 界面
 4. 首次使用需要在 DeepSeek Harness 界面登录 / 填入 API Key
 
 全部子命令与参数见下方「命令行用法」。
 
 ## 命令行用法
 
-每次调用只允许一个动作，出现未知参数或冲突组合时直接报错退出，不会静默回落到前台启动；PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。`--full` 只能与 `--uninstall` 组合使用；数字只允许紧跟在 `--logs` 后作为行数、或紧跟在 `--rollback` 后作为版本列表的显示数量，`--json` 只允许跟随 `--status`，`--follow` 只允许跟随 `--logs`，版本号（形如 `0.1.1-rc.2`）只允许跟随 `--rollback`。
+每次调用只允许一个动作，出现未知参数或冲突组合时直接报错退出，不会静默回落到前台启动；PowerShell 层的失败退出码会原样传播到 `deepseek` 命令的返回值。`--full` 只能与 `--uninstall` 组合使用；数字只允许紧跟在 `--logs` 后作为行数、或紧跟在 `--rollback` 后作为版本列表的显示数量，`--json` 只允许跟随 `--status`，`--follow` 只允许跟随 `--logs`，版本号（形如 `0.1.1-rc.2`）只允许跟随 `--rollback`，浏览器别名只允许跟随 `--open`。
 
 ### 启动与停止
 
@@ -98,6 +99,15 @@ cd dsh-launcher
 | `deepseek --status --json` | 以版本化 JSON 输出同一状态（含时间戳与字段），问题状态（`FAILED` / `UNHEALTHY` / `FOREIGN_PORT`）以非零码退出，便于脚本消费 |
 | `deepseek --logs [N]` | 显示后台日志末尾 N 行（默认 20），如 `deepseek --logs 50` |
 | `deepseek --logs --follow [N]` | 跟随日志输出（Ctrl+C 停止）；日志被轮转后会自动重连新文件，长期运行的后台日志超过 5MB 会轮转保留一代 `.old` |
+
+### 认证与浏览器
+
+| 命令 | 说明 |
+| --- | --- |
+| `deepseek --open` | 在系统默认浏览器中打开当前已运行实例的认证 Web URL |
+| `deepseek --open edge` | 在 Edge 中打开当前已运行实例；别名还支持 `chrome`、`firefox`、`brave`、`default` |
+
+`--open` 只连接已经处于 `READY` 的实例；服务正在启动时请稍后重试。命令会复用 DSH 当前进程的认证入口，不会关闭认证或打印含 token 的 URL。显式浏览器使用其默认配置文件，不支持无痕窗口或指定 profile。
 
 ### 版本与升级
 
@@ -152,7 +162,7 @@ npm install -g @deepseek-ai/dsh
 dsh web
 ```
 
-浏览器打开 http://127.0.0.1:3080 看到界面即启动成功（Ctrl+C 退出）。
+使用启动输出中的认证 URL打开界面即表示启动成功（Ctrl+C 退出）。
 
 > `npm install -g @deepseek-ai/dsh` 会在 npm 的全局可执行目录注册 `dsh`（Windows 中为 `dsh.cmd`）。正常安装的 Node.js 会把该目录加入 PATH；若新开终端后仍提示找不到 `dsh`，请检查 npm 全局目录是否在 PATH 中。
 >
@@ -167,6 +177,7 @@ dsh web
 - **`deepseek --status` 显示 `UNHEALTHY`**：端口 3080 有 DSH 进程在监听但 HTTP 无响应（可能已卡死）；运行 `deepseek --stop` 后重新启动
 - **`deepseek --status` 显示 `FOREIGN_PORT`**：端口 3080 被其他非 DeepSeek Harness 进程占用；启动前请先排查并释放该端口（启动器和停止逻辑都不会误杀陌生进程）
 - **提示端口 3080 被占用（EADDRINUSE）**：说明已有一个实例在运行，用 `deepseek --status` 确认，或先 `deepseek --stop` 再启动
+- **在其他浏览器访问提示 `dsh web authentication required`**：不要直接输入裸地址；在新终端运行 `deepseek --open edge`（也可替换为 `chrome`、`firefox` 或 `brave`）
 - **关闭前台窗口后服务就停了**：设计行为（进程寄宿在控制台窗口）；需要常驻请用 `deepseek -b`
 - **想迁移已配置好的 DSH 设置（含 API Key）**：复制 `%USERPROFILE%\.dsh` 整个文件夹到新电脑的 `C:\Users\<用户名>\.dsh`（含敏感凭据，请勿公开）
 
@@ -181,6 +192,7 @@ dsh web
 | `start-background.cmd` / `.ps1` | 后台启动协调器：支持立即返回或等待就绪，日志写入 `%USERPROFILE%\dsh-launch\dsh-background.log` |
 | `stop-dsh.cmd` / `.ps1` | 停止服务（按端口 3080 定位进程） |
 | `open-when-ready.ps1` | 轮询 HTTP 服务，确认就绪后自动打开浏览器（900 秒超时保护） |
+| `open-dsh.ps1` | 校验当前 DSH 实例并在默认或指定浏览器中打开认证 Web URL |
 | `background-run.ps1` | 持有后台启动锁，记录生命周期状态与日志，并启动就绪监视器和 DSH 子进程 |
 | `background-run.cmd` | 后台 runner 的兼容入口；正常启动关键路径直接使用 `background-run.ps1` |
 | `run-dsh.ps1` | 串行准备版本化 DSH 运行时、补齐必需 peer 依赖、通过 `npm ls --all` 审计后启动 Node 入口 |

@@ -73,7 +73,10 @@ $existing = Get-DshServiceClassification -Port $Port -ExpectedEntrypoint $expect
     -ExpectedStartupToken $expectedToken -RunnerPid $expectedRunnerPid -LaunchRoot $LaunchRoot
 if ($existing.State -eq 'READY') {
     Write-Host "[REUSE] DeepSeek Harness is already ready (PID $($existing.ServicePid))."
-    Start-Process $url
+    $openUrl = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port `
+        -ExpectedStartupToken $expectedToken -ExpectedOwnerPid $expectedRunnerPid
+    if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
+    Start-Process $openUrl
     exit 0
 }
 if ($existing.State -ne 'STOPPED') {
@@ -123,7 +126,7 @@ try {
         -WindowStyle Hidden -ErrorAction Stop | Out-Null
 
     Write-Host 'Starting DeepSeek Harness (foreground)...'
-    Write-Host "Browser will open automatically at $url"
+    Write-Host 'Browser will open automatically when the service is ready.'
     Write-Host 'Press Ctrl+C or close this window to stop.'
     Write-Host
     $dshStarted = $true
@@ -133,7 +136,11 @@ try {
         '-Version', $Version,
         '-RuntimeRoot', $runtimeRoot,
         '-DshArguments', 'web',
-        '-NoOpen'
+        '-NoOpen',
+        '-LaunchRoot', $LaunchRoot,
+        '-StartupToken', $startupToken,
+        '-OwnerPid', [string]$PID,
+        '-Port', [string]$Port
     )
     & $systemPowerShell @runArguments
     $dshExitCode = $LASTEXITCODE
@@ -150,6 +157,11 @@ try {
         & $stateHelper -Action RecordStartupExit -LaunchRoot $LaunchRoot -OwnerPid $PID `
             -StartupToken $startupToken -RuntimeRoot $runtimeRoot -Entrypoint $entrypoint `
             -Version $Version -ExitCode $dshExitCode -Message 'DSH exited before readiness' | Out-Null
+    }
+    try {
+        Remove-DshWebAccessRecord -LaunchRoot $LaunchRoot -ExpectedStartupToken $startupToken -Port $Port
+    } catch {
+        Write-Host '[WARN] Web access record cleanup failed.'
     }
     if ($ownsStartupLock) {
         & $stateHelper -Action ReleaseStartupLock -LaunchRoot $LaunchRoot -OwnerPid $PID `

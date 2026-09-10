@@ -210,14 +210,148 @@ function Test-DshStartupLockIdentity {
     }
 }
 
+function Get-DshStartupUrlFromLine {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line,
+        [ValidateRange(1, 65535)][int]$Port = 3080
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line)) { return '' }
+    $portPattern = [regex]::Escape([string]$Port)
+    $pattern = "(?i)^\s*dsh web:\s+(?<Url>http://127\.0\.0\.1:$portPattern(?:/\?token=[A-Za-z0-9_-]+)?)(?:\s+\(LAN:\s+[^)]*\))?\s*$"
+    $match = [regex]::Match($Line, $pattern)
+    if (-not $match.Success) { return '' }
+    return [string]$match.Groups['Url'].Value
+}
+
+function Test-DshWebAccessUrl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [ValidateRange(1, 65535)][int]$Port = 3080
+    )
+
+    try {
+        $uri = [Uri]$Url
+    } catch {
+        return $false
+    }
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'http' -or $uri.Host -ne '127.0.0.1' -or
+        $uri.Port -ne $Port -or $uri.AbsolutePath -ne '/' -or $uri.Fragment -or $uri.UserInfo) {
+        return $false
+    }
+    if ([string]::IsNullOrEmpty($uri.Query)) { return $true }
+    return $uri.Query -match '^\?token=[A-Za-z0-9_-]+$'
+}
+
+function Get-DshWebAccessRecordPath {
+    param([Parameter(Mandatory = $true)][string]$LaunchRoot)
+
+    if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return '' }
+    return Join-Path $LaunchRoot 'dsh-web-access.json'
+}
+
+function Write-DshWebAccessRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$LaunchRoot,
+        [Parameter(Mandatory = $true)][string]$StartupToken,
+        [Parameter(Mandatory = $true)][int]$OwnerPid,
+        [ValidateRange(1, 65535)][int]$Port = 3080,
+        [Parameter(Mandatory = $true)][string]$Url
+    )
+
+    if ([string]::IsNullOrWhiteSpace($StartupToken) -or $OwnerPid -le 0 -or
+        -not (Test-DshWebAccessUrl -Url $Url -Port $Port)) {
+        throw 'Invalid DSH Web access record input'
+    }
+    $recordPath = Get-DshWebAccessRecordPath -LaunchRoot $LaunchRoot
+    if ([string]::IsNullOrWhiteSpace($recordPath)) { throw 'LaunchRoot is required for the DSH Web access record' }
+    New-Item -ItemType Directory -Force -Path $LaunchRoot | Out-Null
+    $temporaryPath = Join-Path $LaunchRoot ('dsh-web-access-' + [guid]::NewGuid().ToString('N') + '.tmp')
+    $record = [ordered]@{
+        SchemaVersion    = 1
+        StartupToken     = $StartupToken
+        OwnerPid         = $OwnerPid
+        Port             = $Port
+        AuthenticatedUrl = $Url
+        CapturedAt       = (Get-Date).ToString('o')
+    }
+    try {
+        [IO.File]::WriteAllText(
+            $temporaryPath,
+            ($record | ConvertTo-Json -Depth 3),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporaryPath -Destination $recordPath -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath) {
+            Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-DshWebAccessRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$LaunchRoot,
+        [string]$ExpectedStartupToken,
+        [int]$ExpectedOwnerPid = 0,
+        [ValidateRange(1, 65535)][int]$Port = 3080
+    )
+
+    $recordPath = Get-DshWebAccessRecordPath -LaunchRoot $LaunchRoot
+    if ([string]::IsNullOrWhiteSpace($recordPath) -or
+        -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { return $null }
+    try {
+        $record = Get-Content -LiteralPath $recordPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$record.SchemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace([string]$record.StartupToken) -or
+            [int]$record.OwnerPid -le 0 -or [int]$record.Port -ne $Port -or
+            -not (Test-DshWebAccessUrl -Url ([string]$record.AuthenticatedUrl) -Port $Port)) {
+            return $null
+        }
+        if ($ExpectedStartupToken -and
+            -not [string]::Equals([string]$record.StartupToken, $ExpectedStartupToken, [StringComparison]::Ordinal)) {
+            return $null
+        }
+        if ($ExpectedOwnerPid -gt 0 -and [int]$record.OwnerPid -ne $ExpectedOwnerPid) {
+            return $null
+        }
+        return $record
+    } catch {
+        return $null
+    }
+}
+
+function Remove-DshWebAccessRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$LaunchRoot,
+        [string]$ExpectedStartupToken,
+        [ValidateRange(1, 65535)][int]$Port = 3080
+    )
+
+    $recordPath = Get-DshWebAccessRecordPath -LaunchRoot $LaunchRoot
+    if ([string]::IsNullOrWhiteSpace($recordPath) -or
+        -not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { return }
+    if ($ExpectedStartupToken) {
+        $record = Get-DshWebAccessRecord -LaunchRoot $LaunchRoot -ExpectedStartupToken $ExpectedStartupToken `
+            -Port $Port
+        if (-not $record) { return }
+    }
+    Remove-Item -LiteralPath $recordPath -Force
+}
+
 function Get-DshStartupUrl {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$LaunchRoot,
-        [Parameter(Mandatory = $true)][int]$Port
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$ExpectedStartupToken,
+        [int]$ExpectedOwnerPid = 0
     )
 
-    # 无启动根目录（如外部调用方）时优雅回退到默认探测地址。
     if ([string]::IsNullOrWhiteSpace($LaunchRoot)) { return '' }
+
+    $record = Get-DshWebAccessRecord -LaunchRoot $LaunchRoot `
+        -ExpectedStartupToken $ExpectedStartupToken -ExpectedOwnerPid $ExpectedOwnerPid -Port $Port
+    if ($record) { return [string]$record.AuthenticatedUrl }
+
     $logPath = Join-Path $LaunchRoot 'dsh-background.log'
     if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { return '' }
 
@@ -232,10 +366,13 @@ function Get-DshStartupUrl {
         $logText = $logText.Substring($sectionMarkers[$sectionMarkers.Count - 1].Index)
     }
 
-    $pattern = "(?im)^\s*dsh web:\s+(?<Url>http://127\.0\.0\.1:$Port(?:/\?token=[^\s]+)?)\s*$"
-    $matches = [regex]::Matches($logText, $pattern)
-    if ($matches.Count -eq 0) { return '' }
-    return [string]$matches[$matches.Count - 1].Groups['Url'].Value
+    $urls = @()
+    foreach ($line in ($logText -split "`r?`n")) {
+        $url = Get-DshStartupUrlFromLine -Line $line -Port $Port
+        if ($url) { $urls += $url }
+    }
+    if ($urls.Count -eq 0) { return '' }
+    return [string]$urls[$urls.Count - 1]
 }
 
 function Invoke-DshHttpProbe {
@@ -412,7 +549,8 @@ function Get-DshServiceClassification {
             -HttpStatus $null -Entrypoint $entrypoint
     }
 
-    $probeUri = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port
+    $probeUri = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port `
+        -ExpectedStartupToken $ExpectedStartupToken -ExpectedOwnerPid $RunnerPid
     $probe = Invoke-DshHttpProbe -Port $Port -Uri $probeUri
     if (-not $probe.IsReady) {
         return New-DshServiceClassificationResult -State 'UNHEALTHY' -ServicePid $servicePid `

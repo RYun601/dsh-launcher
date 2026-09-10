@@ -739,7 +739,8 @@ try {
 
         Assert-Equal 0 $existing.ExitCode "A healthy DSH-identified occupant should be reused. Output:`n$($existing.Output)"
         Assert-Match $existing.Output '\[REUSE\]' 'Reuse should explain that no duplicate start is needed'
-        Assert-Match $existing.ProcessLog '(?m)^http://127\.0\.0\.1:' 'Reuse should open the browser for the existing service'
+        Assert-Match $existing.ProcessLog '(?m)^http://127\.0\.0\.1:\d+/\?token=test-token' `
+            'Reuse should open the authenticated URL for the existing service'
         Assert-NotMatch $existing.ProcessLog 'background-run\.(?:cmd|ps1)' 'Reuse must not submit another runner'
     }
 
@@ -955,6 +956,34 @@ try {
         Assert-Equal 0 $result.ExitCode 'help should exit successfully'
         Assert-Match $result.Output 'deepseek --rollback ' 'help must document the version listing form'
         Assert-Match $result.Output 'deepseek --rollback VERSION' 'help must document the rollback target form'
+    }
+
+    Invoke-Test 'deepseek --open dispatches a selected browser and preserves its exit code' {
+        $result = Invoke-DeepseekCommand -Argument '--open edge' -PowerShellExitCode 7
+        Assert-Equal 7 $result.ExitCode 'The open command must propagate the PowerShell exit code'
+        Assert-Match $result.ProcessLog 'open-dsh\.ps1.*-Browser edge' 'The selected browser alias must reach open-dsh.ps1'
+    }
+
+    Invoke-Test 'deepseek --open without an alias selects the default browser' {
+        $result = Invoke-DeepseekCommand -Argument '--open' -PowerShellExitCode 0
+        Assert-Equal 0 $result.ExitCode 'The default open command should dispatch successfully'
+        Assert-Match $result.ProcessLog 'open-dsh\.ps1.*-Browser default' 'The default browser alias must be explicit at the PowerShell boundary'
+    }
+
+    Invoke-Test 'deepseek --open rejects unsupported or extra browser arguments' {
+        foreach ($argument in @('--open opera', '--open edge chrome', '--open --status', 'edge --open', '--open edge --open')) {
+            $result = Invoke-DeepseekCommand -Argument $argument
+            Assert-Equal 1 $result.ExitCode "Invalid open syntax must fail: $argument"
+            Assert-Match $result.Output 'Unknown argument|Conflicting actions|Usage:' "Invalid open syntax must be actionable: $argument"
+            Assert-NotMatch $result.ProcessLog 'open-dsh\.ps1' "Invalid open syntax must not dispatch: $argument"
+        }
+    }
+
+    Invoke-Test 'help text documents the browser aliases' {
+        $result = Invoke-DeepseekCommand -Argument '--help'
+        Assert-Equal 0 $result.ExitCode 'help should exit successfully'
+        Assert-Match $result.Output 'deepseek --open \[default\|edge\|chrome\|firefox\|brave\]' `
+            'help must document the supported browser aliases'
     }
 
     Invoke-Test 'foreground launch uses the prepared DSH runtime' {

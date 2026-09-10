@@ -27,6 +27,7 @@ if ($Port -ne 3080 -and $env:DSH_TEST_MODE -ne '1') {
     exit 1
 }
 $stateHelper = Join-Path $PSScriptRoot 'dsh-launch-state.ps1'
+$healthHelper = Join-Path $PSScriptRoot 'dsh-service-health.ps1'
 $runScript = Join-Path $PSScriptRoot 'run-dsh.ps1'
 $monitorScript = Join-Path $PSScriptRoot 'open-when-ready.ps1'
 $log = Join-Path $LaunchRoot 'dsh-background.log'
@@ -35,6 +36,7 @@ $dshExitCode = 1
 $dshStarted = $false
 $ownsStartupLock = $false
 $script:currentStartupStage = ''
+. $healthHelper
 
 if ($env:DSH_SUPPRESS_BROWSER_MONITOR -eq '1') {
     $SuppressBrowserMonitor = $true
@@ -179,7 +181,11 @@ try {
         '-Version', $Version,
         '-RuntimeRoot', $RuntimeRoot,
         '-DshArguments', 'web',
-        '-NoOpen'
+        '-NoOpen',
+        '-LaunchRoot', $LaunchRoot,
+        '-StartupToken', $StartupToken,
+        '-OwnerPid', [string]$PID,
+        '-Port', [string]$Port
     )
     $dshStarted = $true
     $previousErrorActionPreference = $ErrorActionPreference
@@ -208,6 +214,11 @@ try {
             -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot -Entrypoint $Entrypoint `
             -Version $Version -ExitCode $dshExitCode -Message 'DSH exited before readiness' 2>&1)
         Add-RunnerLogLines -Lines $exitOutput
+    }
+    try {
+        Remove-DshWebAccessRecord -LaunchRoot $LaunchRoot -ExpectedStartupToken $StartupToken -Port $Port
+    } catch {
+        Add-RunnerLogLines -Lines @('Web access record cleanup failed: ' + $_.Exception.Message)
     }
     if ($ownsStartupLock) {
         $releaseOutput = @(& $stateHelper -Action ReleaseStartupLock -LaunchRoot $LaunchRoot `

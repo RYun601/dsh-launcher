@@ -242,6 +242,20 @@ if ($Scenario -in @('Duplicate', 'DuplicateReady', 'OccupiedReady', 'OccupiedUnh
         ExitCode = 0
     }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+    if ($Scenario -eq 'OccupiedReady') {
+        [IO.File]::WriteAllText(
+            (Join-Path $ProfilePath 'dsh-launch\dsh-web-access.json'),
+            (@{
+                SchemaVersion = 1
+                StartupToken = $testStartupToken
+                OwnerPid = $PID
+                Port = $Port
+                AuthenticatedUrl = "http://127.0.0.1:$Port/?token=test-token"
+                CapturedAt = [DateTime]::UtcNow.ToString('o')
+            } | ConvertTo-Json),
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
 }
 
 $listener = $null
