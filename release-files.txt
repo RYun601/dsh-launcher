@@ -14,6 +14,7 @@ install-command.cmd
 install.ps1
 LICENSE
 open-when-ready.ps1
+open-dsh.ps1
 README.en.md
 README.md
 register-path.ps1

@@ -22,12 +22,18 @@ set "FULL="
 set "LOG_COUNT="
 set "ROLLBACK_VERSION="
 set "ROLLBACK_COUNT="
+set "OPEN_BROWSER="
+set "OPEN_EXPECTING_BROWSER="
 set "BADARG="
 set "CONFLICT="
 if defined ARGS (
     for %%a in (%ARGS%) do (
         if not defined BADARG if not defined CONFLICT call :classify "%%~a"
     )
+)
+if defined OPEN_EXPECTING_BROWSER (
+    set "OPEN_BROWSER=default"
+    set "OPEN_EXPECTING_BROWSER="
 )
 if defined BADARG (
     echo [ERROR] Unknown argument: %BADARG%
@@ -64,6 +70,11 @@ if /i "%ACTION%"=="stop" (
 )
 if /i "%ACTION%"=="status" (
     call :status
+    set "DSH_RC=!ERRORLEVEL!"
+    exit /b !DSH_RC!
+)
+if /i "%ACTION%"=="open" (
+    call :open
     set "DSH_RC=!ERRORLEVEL!"
     exit /b !DSH_RC!
 )
@@ -149,6 +160,11 @@ if defined STATUS_JSON (
 set "DSH_RC=%ERRORLEVEL%"
 exit /b %DSH_RC%
 
+:open
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0open-dsh.ps1" -Browser "%OPEN_BROWSER%"
+set "DSH_RC=%ERRORLEVEL%"
+exit /b %DSH_RC%
+
 :logs
 set "COUNT=20"
 if defined LOG_COUNT set "COUNT=%LOG_COUNT%"
@@ -226,6 +242,7 @@ echo   deepseek                start in foreground mode (default)
 echo   deepseek -b             submit background startup and return immediately
 echo   deepseek --status       check service state (starting/ready/unhealthy/foreign-port/failed/stopped)
 echo   deepseek --status --json  same state as machine-readable JSON (exit code reflects findings)
+echo   deepseek --open [default^|edge^|chrome^|firefox^|brave]  open the authenticated Web UI in a browser
 echo   deepseek --stop         stop the service
 echo   deepseek --logs [N]     show last N lines of the background log (default 20)
 echo   deepseek --logs --follow [N]  follow the log and reconnect across rotation (Ctrl+C to stop)
@@ -257,6 +274,27 @@ rem ACTION on first hit and CONFLICT when a different action token arrives.
 :classify
 set "CLASSIFY_TOKEN=%~1"
 set "CLASSIFY_THIS="
+if defined OPEN_EXPECTING_BROWSER (
+    if /i "%CLASSIFY_TOKEN%"=="default" set "OPEN_BROWSER=default"
+    if /i "%CLASSIFY_TOKEN%"=="edge" set "OPEN_BROWSER=edge"
+    if /i "%CLASSIFY_TOKEN%"=="chrome" set "OPEN_BROWSER=chrome"
+    if /i "%CLASSIFY_TOKEN%"=="firefox" set "OPEN_BROWSER=firefox"
+    if /i "%CLASSIFY_TOKEN%"=="brave" set "OPEN_BROWSER=brave"
+    if not defined OPEN_BROWSER set "BADARG=%CLASSIFY_TOKEN%"
+    set "OPEN_EXPECTING_BROWSER="
+    goto :eof
+)
+echo(%CLASSIFY_TOKEN%| findstr /i /r /c:"^--open$" >nul 2>&1
+if not errorlevel 1 (
+    if defined ACTION (
+        if /i "%ACTION%"=="open" set "BADARG=duplicate --open"
+        if /i not "%ACTION%"=="open" set "CONFLICT=%ACTION% and open"
+        goto :eof
+    )
+    set "CLASSIFY_THIS=open"
+    set "OPEN_EXPECTING_BROWSER=1"
+    goto :classify_action
+)
 if /i "%CLASSIFY_TOKEN%"=="--full" (
     if defined FULL set "BADARG=duplicate --full"
     set "FULL=1"
@@ -334,6 +372,7 @@ if not defined CLASSIFY_THIS (
     set "BADARG=%CLASSIFY_TOKEN%"
     goto :eof
 )
+:classify_action
 if not defined ACTION (
     set "ACTION=%CLASSIFY_THIS%"
     goto :eof

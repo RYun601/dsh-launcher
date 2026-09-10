@@ -33,7 +33,8 @@ $requiredRuntimeFiles = @(
     'register-path.ps1',
     'update-launcher.ps1',
     'dsh-doctor.ps1',
-    'dsh-logs.ps1'
+    'dsh-logs.ps1',
+    'open-dsh.ps1'
 )
 
 function Assert-Equal {

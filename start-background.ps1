@@ -205,7 +205,10 @@ function Invoke-AttachedStartupAction {
         $pidSuffix = if ($state.ServicePid) { "（PID $($state.ServicePid)）" } else { '' }
         Write-Host "[REUSE] 端口 $Port 已有 DeepSeek Harness 实例$pidSuffix，无需重复启动"
         Write-Host '正在打开浏览器...'
-        Start-Process $url
+        $openUrl = Get-DshStartupUrl -LaunchRoot $launchRoot -Port $Port `
+            -ExpectedStartupToken ([string]$state.StartupToken) -ExpectedOwnerPid $ExistingOwnerPid
+        if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
+        Start-Process $openUrl
         return 0
     }
     if ($state -and $state.State -eq 'FAILED') {
@@ -263,7 +266,10 @@ $existing = Get-DshServiceClassification -Port $Port -ExpectedEntrypoint $existi
 if ($existing.State -eq 'READY') {
     Write-Host "[REUSE] 端口 $Port 已有 DeepSeek Harness 实例在运行（PID $($existing.ServicePid)），无需重复启动"
     Write-Host '正在打开浏览器...'
-    Start-Process $url
+    $openUrl = Get-DshStartupUrl -LaunchRoot $launchRoot -Port $Port `
+        -ExpectedStartupToken $existingToken -ExpectedOwnerPid $existingRunnerPid
+    if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
+    Start-Process $openUrl
     exit 0
 }
 if ($existing.State -ne 'STOPPED') {
@@ -371,7 +377,7 @@ if ($LASTEXITCODE -ne 0) {
 # 3) 命令行后台模式：提交启动后立即返回，由独立监视器负责就绪后打开浏览器
 if (-not $WaitForReady) {
     Write-Host "DeepSeek Harness 后台启动已提交（PID $($proc.Id)）"
-    Write-Host "服务就绪后浏览器将自动打开 $url"
+    Write-Host '服务就绪后浏览器将自动打开本地 Web 界面'
     Write-Host '查看状态：deepseek --status'
     Write-Host '查看日志：deepseek --logs'
     Write-Host '停止服务：deepseek --stop'

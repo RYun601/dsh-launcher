@@ -15,7 +15,8 @@ is also supported.
 
 - **Command-line launch**: type `deepseek` in cmd / PowerShell to start — no need to hunt for icons or remember paths
 - **Foreground / background modes**: foreground shows logs in a window (closing the window stops it); `deepseek -b` submits background startup and returns immediately
-- **Auto-open browser**: opens http://127.0.0.1:3080 automatically when the service is ready
+- **Auto-open browser**: opens the authenticated local Web UI automatically when the service is ready
+- **Cross-browser reopen**: `deepseek --open [default|edge|chrome|firefox|brave]` opens the authenticated URL in a selected browser
 - **Visible shortcut feedback**: shows startup progress, closes after opening the browser, and stays open with log details on failure
 - **Status & stop**: `deepseek --status` shows the run state; `deepseek --stop` stops the service and reminds you how to restart it
 - **Works on both Windows 10 and Windows 11**
@@ -75,14 +76,14 @@ After completing the installation above (any option) and opening a **new** termi
 
 1. Type `deepseek -b` to submit background startup and return immediately (or `deepseek` for foreground mode)
 2. On first run, npm prepares the DeepSeek Harness runtime and required dependencies automatically (needs internet, ~1-2 minutes)
-3. The browser opens http://127.0.0.1:3080 automatically when the service is ready
+3. The browser opens the local Web UI automatically when the service is ready
 4. On first use, sign in / enter an API Key in the DeepSeek Harness UI
 
 See "CLI Usage" below for every subcommand and flag.
 
 ## CLI Usage
 
-Only one action is allowed per invocation; unknown arguments or conflicting combinations fail with an error and never fall back to a foreground launch. Real exit codes from the PowerShell layer are propagated unchanged to the `deepseek` command. `--full` is only valid together with `--uninstall`; a number is valid only immediately after `--logs` as its line count or after `--rollback` as the version-list display count, `--json` only after `--status`, `--follow` only after `--logs`, and a version token (e.g. `0.1.1-rc.2`) only after `--rollback`.
+Only one action is allowed per invocation; unknown arguments or conflicting combinations fail with an error and never fall back to a foreground launch. Real exit codes from the PowerShell layer are propagated unchanged to the `deepseek` command. `--full` is only valid together with `--uninstall`; a number is valid only immediately after `--logs` as its line count or after `--rollback` as the version-list display count, `--json` only after `--status`, `--follow` only after `--logs`, a version token (e.g. `0.1.1-rc.2`) only after `--rollback`, and a browser alias only after `--open`.
 
 ### Start & Stop
 
@@ -100,6 +101,15 @@ Only one action is allowed per invocation; unknown arguments or conflicting comb
 | `deepseek --status --json` | Print the same state as versioned JSON (with timestamps and stable fields); problem states (`FAILED` / `UNHEALTHY` / `FOREIGN_PORT`) exit nonzero for scripting |
 | `deepseek --logs [N]` | Show the last N lines of the background log (default 20), e.g. `deepseek --logs 50` |
 | `deepseek --logs --follow [N]` | Follow the log (Ctrl+C to stop); reconnects automatically after rotation. Long-running background logs rotate to a single `.old` generation once they exceed 5 MB |
+
+### Authentication & browsers
+
+| Command | Description |
+| --- | --- |
+| `deepseek --open` | Open the authenticated URL for the current ready instance in the system default browser |
+| `deepseek --open edge` | Open the current instance in Edge; `chrome`, `firefox`, `brave`, and `default` are also supported |
+
+`--open` only attaches to an instance already in `READY`; retry after startup completes. It reuses the DSH process's authenticated entrypoint without disabling authentication or printing the token URL. Explicit browsers use their default profile; private windows and named profiles are not supported.
 
 ### Version & Upgrades
 
@@ -154,7 +164,7 @@ Open a new terminal, then run:
 dsh web
 ```
 
-The UI at http://127.0.0.1:3080 means it started successfully (press Ctrl+C to exit).
+Opening the authenticated URL printed at startup confirms that it started successfully (press Ctrl+C to exit).
 
 > `npm install -g @deepseek-ai/dsh` registers `dsh` in npm's global executable directory (as `dsh.cmd` on Windows). A standard Node.js installation adds that directory to PATH; if `dsh` is still not found in a new terminal, check that the npm global directory is on PATH.
 >
@@ -169,6 +179,7 @@ The UI at http://127.0.0.1:3080 means it started successfully (press Ctrl+C to e
 - **`deepseek --status` shows `UNHEALTHY`**: a DSH process listens on port 3080 but HTTP is not answering (it may have hung). Run `deepseek --stop` and start again.
 - **`deepseek --status` shows `FOREIGN_PORT`**: port 3080 is owned by a process that is not DeepSeek Harness. Free the port before starting; neither the launcher nor the stop logic will kill an unknown process.
 - **Port 3080 is already in use (EADDRINUSE)**: an instance is already running — check with `deepseek --status`, or run `deepseek --stop` first
+- **Another browser says `dsh web authentication required`**: do not open the bare address; in a new terminal run `deepseek --open edge` (or use `chrome`, `firefox`, or `brave`)
 - **Service stops when the foreground window closes**: by design (the process lives in the console window); use `deepseek -b` for a persistent service
 - **Migrate existing DSH settings (including API Key)**: copy the whole `%USERPROFILE%\.dsh` folder to `C:\Users\<username>\.dsh` on the new machine (contains sensitive credentials — do not share publicly)
 
@@ -183,6 +194,7 @@ For readers who want to understand each script's role or contribute; daily use o
 | `start-background.cmd` / `.ps1` | Background coordinator: supports immediate return or waiting for readiness; logs go to `%USERPROFILE%\dsh-launch\dsh-background.log` |
 | `stop-dsh.cmd` / `.ps1` | Stop the service (finds the process by port 3080) |
 | `open-when-ready.ps1` | Polls the HTTP service and opens the browser when it is ready (900-second timeout) |
+| `open-dsh.ps1` | Validates the current DSH instance and opens its authenticated Web URL in the default or selected browser |
 | `background-run.ps1` | Owns the background startup lock, lifecycle state, log, readiness monitor, and DSH child process |
 | `background-run.cmd` | Compatibility entrypoint for the background runner; normal startup invokes `background-run.ps1` directly |
 | `run-dsh.ps1` | Serializes runtime preparation, completes required peers, audits the tree with `npm ls --all`, and starts the Node entrypoint |

@@ -8,7 +8,16 @@
 
     [switch]$NoOpen,
 
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+
+    [string]$LaunchRoot,
+
+    [string]$StartupToken,
+
+    [int]$OwnerPid = 0,
+
+    [ValidateRange(1, 65535)]
+    [int]$Port = 3080
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +31,20 @@ if (-not $RuntimeRoot) {
     $RuntimeRoot = Join-Path $launchRoot 'runtime'
 }
 $RuntimeRoot = Assert-DshRuntimePathWithinOwnedRoot -Root $launchRoot -Path ([IO.Path]::GetFullPath($RuntimeRoot))
+
+$webAccessEnabled = -not [string]::IsNullOrWhiteSpace($StartupToken) -and $OwnerPid -gt 0
+$webAccessRoot = $launchRoot
+if ($LaunchRoot) {
+    $requestedLaunchRoot = [IO.Path]::GetFullPath($LaunchRoot)
+    if (-not [string]::Equals($requestedLaunchRoot, $launchRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'LaunchRoot must be the current user dsh-launch directory'
+    }
+    $webAccessRoot = $requestedLaunchRoot
+}
+if ($webAccessEnabled) {
+    . (Join-Path $PSScriptRoot 'dsh-service-health.ps1')
+    Remove-DshWebAccessRecord -LaunchRoot $webAccessRoot -ExpectedStartupToken '' -Port $Port
+}
 
 # Node.js 版本前置检查：准备或启动运行时之前失败，避免错误滞后且难以定位。
 . (Join-Path $PSScriptRoot 'dsh-node-version.ps1')
@@ -263,7 +286,23 @@ try {
         $nodeExitCode = 0
     } else {
         Write-Output 'Starting DeepSeek Harness web service...'
-        & node $dshEntrypoint @DshArguments
+        if ($webAccessEnabled) {
+            & node $dshEntrypoint @DshArguments | ForEach-Object {
+                $line = [string]$_
+                $startupUrl = Get-DshStartupUrlFromLine -Line $line -Port $Port
+                if ($startupUrl) {
+                    try {
+                        Write-DshWebAccessRecord -LaunchRoot $webAccessRoot -StartupToken $StartupToken `
+                            -OwnerPid $OwnerPid -Port $Port -Url $startupUrl
+                    } catch {
+                        Write-Warning 'Unable to persist the DSH Web access URL; the URL remains visible in the startup output.'
+                    }
+                }
+                Write-Output $_
+            }
+        } else {
+            & node $dshEntrypoint @DshArguments
+        }
         $nodeExitCode = $LASTEXITCODE
     }
 } finally {

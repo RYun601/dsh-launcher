@@ -43,7 +43,8 @@ while ((Get-Date) -lt $deadline) {
             -OwnerPid $OwnerPid -ServicePid ([int]$classification.ServicePid) `
             -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot -Entrypoint $Entrypoint `
             -Message $classification.Message | Out-Null
-        $openUrl = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port
+        $openUrl = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port `
+            -ExpectedStartupToken $StartupToken -ExpectedOwnerPid $OwnerPid
         if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
         Start-Process $openUrl
         exit 0
