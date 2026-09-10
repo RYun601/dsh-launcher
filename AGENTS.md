@@ -56,6 +56,14 @@
 - `VERSION`：启动器版本；发布标签必须与其组成 `v<VERSION>`。
 - `README.md` / `README.en.md`：面向最终用户的中英文文档，用户可见行为变化时必须同步。
 
+### GitHub 分支、提交与发布流程
+
+- `main` 受 GitHub 分支保护，禁止直接推送；所有变更必须通过 Pull Request 合并，并通过必需的 `validate` 与 `functional` 检查。
+- 普通功能、修复或文档提交不发布新版本：使用对应的 `feat/<topic>`、`fix/<topic>` 或其他明确用途分支，提交并推送分支后创建 PR；不要修改 `VERSION`、创建 `v*` 标签或触发 Release 工作流。
+- 只有用户明确要求“发布/发版/打标签”时才执行发布流程：将 `VERSION` 更新为目标版本，使用 `release-v<VERSION>` 分支（例如 `release-v0.5.0`），创建 PR，检查通过并合并后，基于合并后的 `main` 提交推送 `v<VERSION>` 标签。
+- 发布分支的仓库约定是 `release-v<VERSION>`，不要默认使用 `codex/*` 作为发布分支名；历史分支名称不改变当前约定。
+- 普通提交与版本发布必须分开判断：用户只说“提交代码”时不应擅自递增版本或推送发布标签；用户明确说“发布新版本”时才检查版本、发行清单、Release 工作流和标签一致性。
+
 ### 开发验收与 Release 边界
 
 - 完整 Windows 行为套件是开发完成和发布前本地 Windows 的回归验收要求。创建发布标签前，必须在待发布的同一个 commit 上完成 Windows 行为验收。
