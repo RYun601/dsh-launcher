@@ -114,7 +114,7 @@ cd dsh-launcher
 | 命令 | 说明 |
 | --- | --- |
 | `deepseek --version` | 显示启动器版本与**当前活动**的 DeepSeek Harness 版本（优先读取 `runtime-current.json` 活动指针，指针缺失时回退旧版运行时目录，并标注其他非活动来源） |
-| `deepseek --update` | 对比**活动运行时**版本与 npm 上的最新版本，提示更新方法；本地版本无法确认或远端解析失败时以非零码退出，不会把“未知”当作“已是最新” |
+| `deepseek --update` | 对比**活动运行时**版本与 npm 上的最新版本，并在最新版本后附上对应的 DeepSeek Harness GitHub Release 标签页链接；本地版本无法确认或远端解析失败时以非零码退出，不会把“未知”当作“已是最新” |
 | `deepseek --upgrade` | 一键升级 DeepSeek Harness 运行时（流程与失败回退见下方说明） |
 | `deepseek --rollback` | 列出当前活动版本与 npm 上已发布的 DeepSeek Harness 版本（新 → 旧；默认显示最近 20 个，`deepseek --rollback 0` 显示全部，`deepseek --rollback N` 显示最近 N 个），用于挑选回退目标 |
 | `deepseek --rollback <版本>` | 回退到指定的已发布版本（仅允许低于当前活动版本；复用 `--upgrade` 的事务流程） |
@@ -196,7 +196,7 @@ dsh web
 | `background-run.ps1` | 持有后台启动锁，记录生命周期状态与日志，并启动就绪监视器和 DSH 子进程 |
 | `background-run.cmd` | 后台 runner 的兼容入口；正常启动关键路径直接使用 `background-run.ps1` |
 | `run-dsh.ps1` | 串行准备版本化 DSH 运行时、补齐必需 peer 依赖、通过 `npm ls --all` 审计后启动 Node 入口 |
-| `update-check.ps1` | 版本对比：活动运行时指针 vs npm 最新版（其余来源仅作参考信息） |
+| `update-check.ps1` | 版本对比：活动运行时指针 vs npm 最新版，并输出对应的 DeepSeek Harness GitHub Release 标签页链接（其余来源仅作参考信息） |
 | `update-launcher.ps1` | 启动器自更新：查询 / 下载 / 校验 GitHub 发行包并事务式替换当前安装（`--update-launcher` / `--upgrade-launcher`） |
 | `dsh-doctor.ps1` | `deepseek --check` 的环境诊断实现 |
 | `dsh-logs.ps1` | `deepseek --logs` 的日志查看与跟随（支持轮转重连）实现 |

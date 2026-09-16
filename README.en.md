@@ -116,7 +116,7 @@ Only one action is allowed per invocation; unknown arguments or conflicting comb
 | Command | Description |
 | --- | --- |
 | `deepseek --version` | Show the launcher version and the **active** DeepSeek Harness version (reads the `runtime-current.json` pointer first, falls back to the legacy runtime dir, and lists other inactive sources) |
-| `deepseek --update` | Compare the **active runtime** version with the latest on npm and show how to update; exits nonzero when the local version cannot be confirmed or the remote lookup fails - unknown is never treated as already latest |
+| `deepseek --update` | Compare the **active runtime** version with the latest on npm and include the corresponding DeepSeek Harness GitHub Release tag page link; exits nonzero when the local version cannot be confirmed or the remote lookup fails - unknown is never treated as already latest |
 | `deepseek --upgrade` | One-click upgrade of the DeepSeek Harness runtime (flow and rollback see notes below) |
 | `deepseek --rollback` | List the active version plus the published DeepSeek Harness versions on npm (newest first; shows the newest 20 by default, `deepseek --rollback 0` lists all, `deepseek --rollback N` lists the newest N) to pick a rollback target |
 | `deepseek --rollback <version>` | Roll back to a specific published version (must be lower than the active version; reuses the `--upgrade` transaction) |
@@ -198,7 +198,7 @@ For readers who want to understand each script's role or contribute; daily use o
 | `background-run.ps1` | Owns the background startup lock, lifecycle state, log, readiness monitor, and DSH child process |
 | `background-run.cmd` | Compatibility entrypoint for the background runner; normal startup invokes `background-run.ps1` directly |
 | `run-dsh.ps1` | Serializes runtime preparation, completes required peers, audits the tree with `npm ls --all`, and starts the Node entrypoint |
-| `update-check.ps1` | Version comparison: active runtime pointer vs latest on npm (other sources are informational only) |
+| `update-check.ps1` | Version comparison: active runtime pointer vs latest on npm, including the corresponding DeepSeek Harness GitHub Release tag page link (other sources are informational only) |
 | `update-launcher.ps1` | Launcher self-update: query / download / verify the GitHub release and transactionally replace the current install (`--update-launcher` / `--upgrade-launcher`) |
 | `dsh-doctor.ps1` | Implementation of the `deepseek --check` environment diagnosis |
 | `dsh-logs.ps1` | Implementation of `deepseek --logs` viewing and follow mode (rotation-aware reconnect) |

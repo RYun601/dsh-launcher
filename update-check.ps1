@@ -77,7 +77,7 @@ if (-not $latest) {
     Write-Host "无法获取最新版本（请检查网络后重试）"
     exit 1
 }
-Write-Host "最新版本：$latest"
+Write-Host "最新版本：$latest（https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v$latest）"
 
 if ($local -eq 'unknown' -or $report.PointerError) {
     Write-Host "无法确认当前实际使用的 DSH 版本，不能判断是否最新；请先完成一次 deepseek -b 启动。"
