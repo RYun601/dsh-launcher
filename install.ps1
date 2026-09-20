@@ -138,9 +138,14 @@ function Move-DshDirectoryWithRetry {
 
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         try {
-            Move-Item -LiteralPath $Source -Destination $Destination -ErrorAction Stop
+            [IO.Directory]::Move($Source, $Destination)
             return $true
-        } catch [IO.IOException] {
+        } catch {
+            $exception = $_.Exception
+            while ($exception -and $exception -isnot [IO.IOException]) {
+                $exception = $exception.InnerException
+            }
+            if (-not $exception) { throw }
             Start-Sleep -Milliseconds 100
         }
     }

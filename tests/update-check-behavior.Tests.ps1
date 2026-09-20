@@ -174,8 +174,16 @@ try {
         Assert-Equal 0 $result.ExitCode "Update check should succeed. Output:`n$($result.Output)"
         Assert-Match $result.Output ([regex]::Escape('runtime-current')) 'The active source must be labeled as the runtime-current pointer'
         $versionMentions = [regex]::Matches($result.Output, '0\.1\.0-rc\.8').Count
-        Assert-Equal 2 $versionMentions 'The active version should appear as local and latest'
+        Assert-Equal 3 $versionMentions 'The active version should appear as local, latest, and tag link'
         Assert-Match $result.Output ([regex]::Escape('已是最新版本')) 'A current install must be reported as up to date'
+    }
+
+    Invoke-Test 'update check links the latest version to its specific DeepSeek Harness tag page' {
+        $fixture = New-UpdateFixture -Name 'latest-release-link' -PointerVersion '0.1.0-rc.8'
+        $result = Invoke-UpdateCheck -Fixture $fixture
+        Assert-Equal 0 $result.ExitCode "Update check should succeed. Output:`n$($result.Output)"
+        Assert-Match $result.Output ([regex]::Escape('最新版本：0.1.0-rc.8（https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.0-rc.8）')) `
+            'The latest version line must include the specific DeepSeek Harness release tag URL'
     }
 
     Invoke-Test 'update check labels a legacy runtime that differs from the active pointer' {

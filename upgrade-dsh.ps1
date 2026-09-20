@@ -222,19 +222,30 @@ function Get-DshIncompatiblePluginPackages {
         return @()
     }
 
-    # 只检查本次 runner 尝试中的“插件依赖 DSH 已移除的导出”错误，
+    # 只检查本次 runner 尝试中的“插件与目标 DSH 不兼容”错误，
     # 避免把普通启动失败或历史日志中的插件名误判为可自动处理的问题。
     $sectionMarkers = [regex]::Matches($logText, '(?m)^===== ')
     if ($sectionMarkers.Count -gt 0) {
         $logText = $logText.Substring($sectionMarkers[$sectionMarkers.Count - 1].Index)
     }
 
-    $pattern = "(?im)failed to import loader entry[^\r\n(]*\((?<Package>[^)\r\n]+)\):\s+The requested module '@deepseek-ai/[^']+' does not provide an export named"
+    # 可识别的签名：
+    #  1) 插件导入了目标 DSH 已移除的导出；
+    #  2) 插件树加载失败且 typert 贡献者逐条注册失败——有问题的包名在 “- typert-loader: <包名>” 行首。
+    $patterns = @(
+        "(?im)failed to import loader entry[^\r\n(]*\((?<Package>[^)\r\n]+)\):\s+The requested module '@deepseek-ai/[^']+' does not provide an export named"
+    )
+    if ($logText -match 'plugin tree failed to load') {
+        $patterns += "(?im)^\s*-\s*typert-loader:\s+(?<Package>\S+)\s"
+    }
+
     $packages = @{}
-    foreach ($match in [regex]::Matches($logText, $pattern)) {
-        $packageName = [string]$match.Groups['Package'].Value
-        if ($packageName -notmatch '^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+$') { continue }
-        $packages[$packageName] = $true
+    foreach ($pattern in $patterns) {
+        foreach ($match in [regex]::Matches($logText, $pattern)) {
+            $packageName = [string]$match.Groups['Package'].Value
+            if ($packageName -notmatch '^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+$') { continue }
+            $packages[$packageName] = $true
+        }
     }
 
     return @($packages.Keys | Sort-Object)

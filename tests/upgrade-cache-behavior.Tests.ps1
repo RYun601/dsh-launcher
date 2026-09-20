@@ -110,9 +110,14 @@ Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value ('===== fake startup '
 Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "DSH version: $Version"
 $exitCode = 0
 if ($env:DSH_TEST_START_FAIL_VERSION -and $Version -eq $env:DSH_TEST_START_FAIL_VERSION -and -not (Test-Path -LiteralPath $env:DSH_TEST_PLUGIN_REMOVE_MARKER)) {
-    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: dsh: plugin tree failed to load"
-    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry vision-toolkit (@dsh-external/dsh-vision-toolkit): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
-    Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry better-sidebar (dsh-better-sidebar): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
+    if ($env:DSH_TEST_START_FAIL_MODE -eq 'typert') {
+        Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: dsh: plugin tree failed to load: failed to apply loader entry typert-loader (@deepseek-ai/dsh-typert-loader): typert-loader: 1 typert contributor(s) failed to register:"
+        Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "  - typert-loader: dsh-mysql invocation `"mysql/listConnections`" parameter codec has no create() factory"
+    } else {
+        Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: dsh: plugin tree failed to load"
+        Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry vision-toolkit (@dsh-external/dsh-vision-toolkit): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
+        Add-Content -LiteralPath $launchLog -Encoding UTF8 -Value "Error: failed to import loader entry better-sidebar (dsh-better-sidebar): The requested module '@deepseek-ai/dsh-settings' does not provide an export named 'settingsNamespace'"
+    }
     $exitCode = 1
 }
 exit $exitCode
@@ -158,6 +163,7 @@ function Invoke-UpgradeFixture {
         [pscustomobject]$Fixture,
         [string]$NodeVersion = '',
         [string]$StartFailVersion = '',
+        [string]$StartFailMode = '',
         [string]$PromptAnswer = '',
         [string]$MaintenanceTimeout = '30000',
         [string[]]$ExtraArguments = @()
@@ -170,6 +176,7 @@ function Invoke-UpgradeFixture {
     $previousUpgradeLog = $env:DSH_TEST_UPGRADE_LOG
     $previousAttemptsLog = $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG
     $previousStartFailVersion = $env:DSH_TEST_START_FAIL_VERSION
+    $previousStartFailMode = $env:DSH_TEST_START_FAIL_MODE
     $previousNpmLog = $env:DSH_TEST_NPM_LOG
     $previousStopMarker = $env:DSH_TEST_STOP_MARKER
     $previousNodeVersion = $env:DSH_TEST_NODE_VERSION
@@ -185,6 +192,7 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_UPGRADE_LOG = $Fixture.StartLog
         $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG = $Fixture.AttemptsLog
         $env:DSH_TEST_START_FAIL_VERSION = $StartFailVersion
+        $env:DSH_TEST_START_FAIL_MODE = $StartFailMode
         $env:DSH_TEST_NPM_LOG = $Fixture.NpmLog
         $env:DSH_TEST_STOP_MARKER = $Fixture.StopMarker
         $env:DSH_TEST_NODE_VERSION = $NodeVersion
@@ -215,6 +223,7 @@ function Invoke-UpgradeFixture {
         $env:DSH_TEST_UPGRADE_LOG = $previousUpgradeLog
         $env:DSH_TEST_UPGRADE_ATTEMPTS_LOG = $previousAttemptsLog
         $env:DSH_TEST_START_FAIL_VERSION = $previousStartFailVersion
+        $env:DSH_TEST_START_FAIL_MODE = $previousStartFailMode
         $env:DSH_TEST_NPM_LOG = $previousNpmLog
         $env:DSH_TEST_STOP_MARKER = $previousStopMarker
         $env:DSH_TEST_NODE_VERSION = $previousNodeVersion
@@ -533,6 +542,24 @@ try {
         $attempts = [IO.File]::ReadAllText($fixture.AttemptsLog)
         Assert-Match $attempts '(?ms)^VERSION=0\.1\.2-alpha\.3;.*\r?\nVERSION=0\.1\.2-alpha\.3;' 'The candidate must be retried after incompatible plugins are removed'
         Assert-Match $result.Output '0\.1\.2-alpha\.3' 'The repaired candidate must be committed after the retry'
+    }
+
+    Invoke-Test 'typert contributor registration failures identify the plugin package for removal' {
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-typert-repair') `
+            -NpmLog (Join-Path $testRoot 'upgrade-typert-repair-npm.log') `
+            -ResolvedVersion '0.1.2-alpha.3'
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture `
+            -StartFailVersion '0.1.2-alpha.3' -StartFailMode 'typert' -PromptAnswer 'Y'
+
+        Assert-Equal 0 $result.ExitCode "A confirmed typert plugin repair should allow the upgrade to succeed. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'dsh-mysql' 'The prompt must identify the typert-incompatible plugin'
+        Assert-True (Test-Path -LiteralPath (Join-Path $fixture.Root 'plugin-removed.marker')) 'A confirmed repair must invoke the target runtime plugin removal command'
+        $nodeLog = Read-NpmLog (Join-Path $fixture.Root 'node.log')
+        Assert-Match $nodeLog 'plugin .*--profile web remove .*dsh-mysql' 'The repair must remove the typert-incompatible plugin from the web profile'
+        Assert-NotMatch $nodeLog 'dsh-typert-loader' 'The repair must not remove the loader that reported the failure'
+        $attempts = [IO.File]::ReadAllText($fixture.AttemptsLog)
+        Assert-Match $attempts '(?ms)^VERSION=0\.1\.2-alpha\.3;.*\r?\nVERSION=0\.1\.2-alpha\.3;' 'The candidate must be retried after the typert-incompatible plugin is removed'
     }
 
     Invoke-Test 'declining incompatible plugin removal preserves the plugins and rolls back' {
