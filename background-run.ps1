@@ -168,7 +168,11 @@ try {
             '-RuntimeRoot', "`"$RuntimeRoot`"",
             '-Entrypoint', "`"$Entrypoint`"",
             '-Port', [string]$Port,
-            '-StableMilliseconds', '5000',
+            # DSH prints its authenticated URL only after the plugin tree has
+            # settled and been audited, so the readiness classification itself is
+            # already a late signal. A short same-PID confirmation is enough to
+            # reject a listener that dies immediately; 5s only delayed the browser.
+            '-StableMilliseconds', '2000',
             '-PollIntervalMilliseconds', '200'
         )
         Start-Process -FilePath $systemPowerShell -ArgumentList $monitorArguments `
