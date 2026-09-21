@@ -2,6 +2,7 @@ dsh-background.log
 dsh-background.log.err
 dsh-background.log.old
 .worktrees/
+.zcode/
 dist/
 Microsoft/
 docs/
