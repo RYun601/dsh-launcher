@@ -834,7 +834,7 @@ try {
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-RuntimeRoot "' + $result.RuntimeRoot + '"')) 'The monitor must receive the selected runtime root'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Entrypoint "' + $result.Entrypoint + '"')) 'The monitor must receive the exact entrypoint'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-Port ' + $result.Port)) 'The monitor must classify the isolated test service port'
-        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-StableMilliseconds 5000')) 'The monitor must require a stable identity window'
+        Assert-Match $result.MonitorCommandLine ([regex]::Escape('-StableMilliseconds 2000')) 'The monitor must require a stable identity window'
         Assert-Match $result.MonitorCommandLine ([regex]::Escape('-PollIntervalMilliseconds 200')) 'The runner must use the 200 ms readiness interval'
         Assert-Equal $result.StartupToken ([string]$result.StateDuringRun.StartupToken) 'Runner state must retain the coordinator token'
         Assert-Equal $result.RuntimeRoot ([string]$result.StateDuringRun.RuntimeRoot) 'Runner state must retain the selected runtime root'

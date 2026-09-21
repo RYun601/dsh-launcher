@@ -112,11 +112,15 @@ function Invoke-MonitorScenario {
     }
 
     $statePath = Join-Path $launchRoot 'dsh-startup.json'
+    $backgroundLogPath = Join-Path $launchRoot 'dsh-background.log'
     return [pscustomobject]@{
         ExitCode = $exitCode
-        Output = [string]($output -join [Environment]::NewLine)
-        Events = [IO.File]::ReadAllText($eventsPath)
-        State = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        Output   = [string]($output -join [Environment]::NewLine)
+        Events   = [IO.File]::ReadAllText($eventsPath)
+        State    = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+        BackgroundLog = if (Test-Path -LiteralPath $backgroundLogPath -PathType Leaf) {
+            [IO.File]::ReadAllText($backgroundLogPath)
+        } else { '' }
         Entrypoint = $entrypoint
         RuntimeRoot = $runtimeRoot
         StartupToken = $startupToken
@@ -259,6 +263,8 @@ try {
         Assert-Equal 0 $result.ExitCode "A token-protected DSH page should become ready. Output:`n$($result.Output)"
         Assert-Match $result.Events '(?m)^OPEN http://127\.0\.0\.1:\d+/\?token=test-token\r?\n$' `
             'The monitor must open the token-protected DSH URL after readiness'
+        Assert-Match $result.BackgroundLog '(?m)^Readiness verified after [\d.]+s; opening the browser\r?$' `
+            'The monitor must record how long readiness took before opening the browser'
         Assert-Equal 'READY' $result.State.State 'A token-protected DSH page must record READY'
     }
 

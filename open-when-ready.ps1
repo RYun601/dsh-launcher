@@ -39,14 +39,31 @@ while ((Get-Date) -lt $deadline) {
         -ExpectedStartupToken $StartupToken -RunnerPid $OwnerPid -LaunchRoot $LaunchRoot `
         -StableMilliseconds $StableMilliseconds -PollMilliseconds $PollIntervalMilliseconds
     if ($classification.State -eq 'READY') {
+        # The browser is the user-visible result of readiness, so it must not
+        # wait behind the state write (a separate PowerShell process).
+        $openUrl = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port `
+            -ExpectedStartupToken $StartupToken -ExpectedOwnerPid $OwnerPid
+        if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
+        $elapsed = ''
+        try {
+            $stateFile = Join-Path $LaunchRoot 'dsh-startup.json'
+            if (Test-Path -LiteralPath $stateFile -PathType Leaf) {
+                $current = Get-Content -LiteralPath $stateFile -Raw -Encoding UTF8 | ConvertFrom-Json
+                $startedAt = [DateTime]$current.StartedAt
+                if ($startedAt -gt [DateTime]::MinValue) {
+                    $elapsed = ' after ' + [Math]::Round((([DateTime]::UtcNow) - $startedAt.ToUniversalTime()).TotalSeconds, 1) + 's'
+                }
+            }
+        } catch { }
+        try {
+            Add-Content -LiteralPath (Join-Path $LaunchRoot 'dsh-background.log') -Encoding UTF8 `
+                -Value ("Readiness verified$elapsed; opening the browser")
+        } catch { }
+        Start-Process $openUrl
         & $stateHelper -Action WriteStartupState -LaunchRoot $LaunchRoot -State READY `
             -OwnerPid $OwnerPid -ServicePid ([int]$classification.ServicePid) `
             -StartupToken $StartupToken -RuntimeRoot $RuntimeRoot -Entrypoint $Entrypoint `
             -Message $classification.Message | Out-Null
-        $openUrl = Get-DshStartupUrl -LaunchRoot $LaunchRoot -Port $Port `
-            -ExpectedStartupToken $StartupToken -ExpectedOwnerPid $OwnerPid
-        if ([string]::IsNullOrWhiteSpace($openUrl)) { $openUrl = $url }
-        Start-Process $openUrl
         exit 0
     }
 
