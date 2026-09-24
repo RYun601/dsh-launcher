@@ -168,6 +168,14 @@ try {
     Assert-Match $status.Output '^(STOPPED|READY|UNHEALTHY|FOREIGN_PORT|STARTING|FAILED)' 'Packaged --status should print a launcher state line'
 
     Compress-Archive -LiteralPath $packageRoot -DestinationPath $installerArchive -CompressionLevel Optimal
+    # R9: the installer verifies the archive against its SHA-256 sidecar before
+    # extracting anything, so the packaged smoke install needs one as well.
+    $installerArchiveDigest = (Get-FileHash $installerArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText(
+        ($installerArchive + '.sha256'),
+        "$installerArchiveDigest  dsh-launcher.zip`r`n",
+        [Text.UTF8Encoding]::new($false)
+    )
     $installer = Join-Path $packageRoot 'install.ps1'
     $installerResult = Invoke-PackagedInstaller -InstallerPath $installer
     Assert-Equal 0 $installerResult.ExitCode "Packaged installer failed. Output:`n$($installerResult.Output)"

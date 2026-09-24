@@ -37,7 +37,9 @@ dsh-launcher 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harn
 irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
 ```
 
-自动完成：下载最新 Release → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
+自动完成：下载最新 Release → 校验发行包 SHA-256 与包清单 → 解压到 `%USERPROFILE%\dsh-launcher` → 注册 `deepseek` 命令。
+
+> 安装器在解压前会核对发行包的 SHA-256（优先使用 GitHub 发行资产摘要，其次为随包发布的 `.sha256` 校验文件）与包内 `release-files.txt` 清单；摘要缺失或不匹配、或包内文件与清单不一致时，安装会拒绝执行，不会写入任何文件。
 
 > 默认不创建桌面快捷方式。需要快捷方式时，请在同一个 PowerShell 窗口依次执行以下两步：
 >

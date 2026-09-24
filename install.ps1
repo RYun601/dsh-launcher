@@ -188,7 +188,146 @@ function Assert-DshPayloadPackage {
             throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5185 install.ps1 \u5e26\u6709 UTF-8 BOM')
         }
     }
+    # R9: the shipped manifest is the single source of truth for the package
+    # file set. Missing manifest files and undeclared extra files both refuse
+    # the install, so a tampered archive cannot smuggle extra scripts into the
+    # install directory.
+    $manifestFile = Join-Path $PayloadRoot 'release-files.txt'
+    if (-not (Test-Path -LiteralPath $manifestFile -PathType Leaf)) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11\u6e05\u5355\u6587\u4ef6 release-files.txt')
+    }
+    $manifestSet = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in @(Get-Content -LiteralPath $manifestFile | ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith('#') })) {
+        $manifestSet.Add($line.Replace('/', '\')) | Out-Null
+    }
+    if ($manifestSet.Count -eq 0) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u6e05\u5355\u4e3a\u7a7a')
+    }
+    $actualSet = New-Object System.Collections.Generic.HashSet[string]([StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in @(Get-ChildItem -LiteralPath $PayloadRoot -Recurse -File)) {
+        $relative = $item.FullName.Substring($PayloadRoot.Length + 1).Replace('/', '\')
+        $actualSet.Add($relative) | Out-Null
+    }
+    foreach ($missing in @($manifestSet | Where-Object { -not $actualSet.Contains($_) })) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11\u6e05\u5355\u58f0\u660e\u7684\u6587\u4ef6 ') + $missing
+    }
+    foreach ($extra in @($actualSet | Where-Object { -not $manifestSet.Contains($_) })) {
+        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5b58\u5728\u6e05\u5355\u4e4b\u5916\u7684\u6587\u4ef6 ') + $extra
+    }
     return $packageVersion
+}
+
+# R9: download integrity for the installer. The archive must be verified
+# against the release SHA-256 before any payload file is extracted or executed.
+function Get-DshArchiveSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            $hash = $sha256.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+        return ((($hash | ForEach-Object { $_.ToString('x2') }) -join '').ToLowerInvariant())
+    } finally {
+        $sha256.Dispose()
+    }
+}
+
+# R9: reject dangerous zip entries before extraction: drive-qualified, ADS,
+# absolute and parent-traversal paths, case-colliding duplicates, empty names
+# and oversized entries. Mirrors the self-update entry guard.
+function Test-DshArchiveEntries {
+    param([Parameter(Mandatory = $true)][string]$ZipPath)
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $zip = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+    try {
+        if ($zip.Entries.Count -gt 2000) {
+            throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u6761\u76ee\u6570\u91cf\u5f02\u5e38')
+        }
+        $seen = @{}
+        foreach ($entry in $zip.Entries) {
+            $name = ([string]$entry.FullName).Replace('/', '\')
+            if (-not $name) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u7a7a\u6761\u76ee')
+            }
+            if ($name -match '^[A-Za-z]:') {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u76d8\u7b26\u8def\u5f84\u6761\u76ee\uff1a') + $name
+            }
+            if ($name.Contains(':')) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u975e\u6cd5\u6d41\u8def\u5f84\u6761\u76ee\uff1a') + $name
+            }
+            if ($name.StartsWith('\') -or $name.StartsWith('\\')) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u7edd\u5bf9\u8def\u5f84\u6761\u76ee\uff1a') + $name
+            }
+            if ($name -eq '..\' -or $name.StartsWith('..\') -or $name.Contains('\..\')) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u8def\u5f84\u7a7f\u8d8a\u6761\u76ee\uff1a') + $name
+            }
+            $key = $name.ToLowerInvariant().TrimEnd('\')
+            if ($seen.ContainsKey($key)) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u542b\u6709\u5927\u5c0f\u5199\u5f52\u4e00\u540e\u7684\u91cd\u540d\u6761\u76ee\uff1a') + $name
+            }
+            $seen[$key] = $true
+            if ($entry.Length -gt 512MB) {
+                throw (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305\u6761\u76ee\u8d85\u51fa\u5927\u5c0f\u9650\u5236\uff1a') + $name
+            }
+        }
+    } finally {
+        $zip.Dispose()
+    }
+}
+
+# R9: resolve the expected release digest. The GitHub API digest field is
+# preferred; the published .sha256 sidecar asset is the fallback. Without
+# either the install refuses instead of trusting the transport alone.
+function Get-DshExpectedArchiveDigest {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArchivePath,
+        $Release,
+        $Asset
+    )
+
+    $digest = ''
+    if ($Release -and $Asset) {
+        if ($Asset.PSObject.Properties['digest'] -and $Asset.digest) {
+            $digestMatch = [regex]::Match(([string]$Asset.digest), '^sha256:([0-9a-fA-F]{64})$')
+            if ($digestMatch.Success) {
+                $digest = $digestMatch.Groups[1].Value.ToLowerInvariant()
+            }
+        }
+    }
+    if (-not $digest) {
+        $sidecarPath = $ArchivePath + '.sha256'
+        if ($env:DSH_TEST_MODE -eq '1' -and -not [string]::IsNullOrWhiteSpace($env:DSH_TEST_INSTALL_ARCHIVE)) {
+            $testSidecar = [string]$env:DSH_TEST_INSTALL_ARCHIVE + '.sha256'
+            if (-not (Test-Path -LiteralPath $testSidecar -PathType Leaf)) {
+                throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u7f3a\u5c11 SHA-256 \u6821\u9a8c\u6750\u6599\uff0c\u65e0\u6cd5\u5b89\u5168\u5b89\u88c5\uff1b\u8bf7\u624b\u52a8\u4e0b\u8f7d\u5b98\u65b9\u5b89\u88c5\u5305\u3002')
+            }
+            Copy-Item -LiteralPath $testSidecar -Destination $sidecarPath -Force
+        } else {
+            $sidecarAsset = $null
+            if ($Release -and $Release.PSObject.Properties['assets'] -and $Release.assets) {
+                $sidecars = @($Release.assets | Where-Object { [string]$_.name -eq 'dsh-launcher.zip.sha256' })
+                if ($sidecars.Count -eq 1) { $sidecarAsset = $sidecars[0] }
+            }
+            if (-not $sidecarAsset) {
+                throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u7248\u7f3a\u5c11 SHA-256 \u6821\u9a8c\u6750\u6599\uff0c\u65e0\u6cd5\u5b89\u5168\u5b89\u88c5\uff1b\u8bf7\u624b\u52a8\u4e0b\u8f7d\u5b98\u65b9\u5b89\u88c5\u5305\u3002')
+            }
+            Invoke-WebRequest -Uri ([string]$sidecarAsset.browser_download_url) -OutFile $sidecarPath `
+                -Headers @{ 'User-Agent' = 'dsh-installer' } -TimeoutSec 60
+        }
+        $sidecarText = ([string](Get-Content -LiteralPath $sidecarPath -Raw)).Trim()
+        $digestMatch = [regex]::Match($sidecarText, '(?:^|\s)([0-9a-fA-F]{64})(?:\s|$)')
+        if (-not $digestMatch.Success) {
+            throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1aSHA-256 \u6821\u9a8c\u6587\u4ef6\u683c\u5f0f\u65e0\u6548')
+        }
+        $digest = $digestMatch.Groups[1].Value.ToLowerInvariant()
+    }
+    return $digest
 }
 
 # Keep this defense for BOM-prefixed irm | iex input in Windows PowerShell 5.1.
@@ -273,6 +412,17 @@ $oldInstallDir = $null
 $installSwapped = $false
 $installCommitted = $false
 try {
+    # R9: verify the downloaded archive against the release SHA-256 before any
+    # payload file is extracted or executed, then reject dangerous zip entries.
+    $expectedDigest = Get-DshExpectedArchiveDigest -ArchivePath $tmp -Release $rel -Asset $asset
+    $actualDigest = Get-DshArchiveSha256 -Path $tmp
+    if ($actualDigest -ne $expectedDigest) {
+        throw ((ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305 SHA-256 \u6821\u9a8c\u5931\u8d25\uff08\u671f\u671b ') + $expectedDigest +
+            (ConvertFrom-DshUnicodeText '\uff0c\u5b9e\u9645 ') + $actualDigest +
+            (ConvertFrom-DshUnicodeText '\uff09'))
+    }
+    Write-Host (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305 SHA-256 \u6821\u9a8c\u901a\u8fc7\u3002')
+    Test-DshArchiveEntries -ZipPath $tmp
     Expand-Archive -LiteralPath $tmp -DestinationPath $staging -Force
     $stageEntry = Join-Path $staging 'deepseek.cmd'
     if (-not (Test-Path -LiteralPath $stageEntry)) {
@@ -405,6 +555,7 @@ try {
     Exit-DshInstallMaintenanceLock -Mutex $maintenanceMutex
     Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath ($tmp + '.sha256') -Force -ErrorAction SilentlyContinue
 }
 
 if (-not $SkipPath) {

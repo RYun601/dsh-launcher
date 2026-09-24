@@ -62,6 +62,10 @@ jobs:
           grep -q 'npm-cache\\_npx' upgrade-dsh.ps1 || { echo "::error::upgrade-dsh.ps1 must clear the REAL npx cache dir (npm-cache\\_npx)"; exit 1; }
           # 回归防护（P1 教训）：deepseek.cmd 必须保留未知参数白名单校验块
           grep -q 'BADARG' deepseek.cmd || { echo "::error::deepseek.cmd missing unknown-argument validation"; exit 1; }
+          # 回归防护（R9 教训）：install.ps1 必须保留发行包 SHA-256、zip 条目与包清单校验
+          grep -q 'Get-DshExpectedArchiveDigest' install.ps1 || { echo "::error::install.ps1 missing release digest verification"; exit 1; }
+          grep -q 'Test-DshArchiveEntries' install.ps1 || { echo "::error::install.ps1 missing zip entry validation"; exit 1; }
+          grep -q 'release-files.txt' install.ps1 || { echo "::error::install.ps1 missing release manifest verification"; exit 1; }
           echo "cmd files OK"
 
       - name: Prepare package

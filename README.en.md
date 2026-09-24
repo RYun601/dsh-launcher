@@ -38,7 +38,9 @@ dsh-launcher only requires Node.js. On the first `deepseek` run, it prepares and
 irm https://raw.githubusercontent.com/RYun601/dsh-launcher/main/install.ps1 | iex
 ```
 
-Downloads the latest Release, extracts it to `%USERPROFILE%\dsh-launcher`, and registers the `deepseek` command automatically.
+Downloads the latest Release, verifies the release package SHA-256 and manifest, extracts it to `%USERPROFILE%\dsh-launcher`, and registers the `deepseek` command automatically.
+
+> Before extraction the installer verifies the package SHA-256 (the GitHub release asset digest first, the published `.sha256` sidecar as fallback) and the shipped `release-files.txt` manifest. The install refuses without writing anything when the digest is missing or mismatched, or when the package files do not match the manifest.
 
 > A desktop shortcut is not created by default. To create one, run these two steps in the same PowerShell window:
 >
