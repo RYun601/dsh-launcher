@@ -176,6 +176,19 @@ try {
         "$installerArchiveDigest  dsh-launcher.zip`r`n",
         [Text.UTF8Encoding]::new($false)
     )
+    # Diagnostics: the installer compares the extracted file set against the
+    # shipped manifest, so a smoke failure must show the archive entry layout.
+    Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+    $installerZip = [IO.Compression.ZipFile]::OpenRead($installerArchive)
+    try {
+        $entryNames = @($installerZip.Entries | ForEach-Object { [string]$_.FullName })
+        Write-Host "installer archive entries: $($entryNames.Count)"
+        Write-Host "has nested entry: $([bool]($entryNames -match '^dsh-launcher/'))"
+        Write-Host "has flat entry: $([bool]($entryNames -match '^[^/\\]+$'))"
+        Write-Host "background-run.cmd entries: $(@($entryNames | Where-Object { $_ -match 'background-run\.cmd$' }).Count)"
+    } finally {
+        $installerZip.Dispose()
+    }
     $installer = Join-Path $packageRoot 'install.ps1'
     $installerResult = Invoke-PackagedInstaller -InstallerPath $installer
     Assert-Equal 0 $installerResult.ExitCode "Packaged installer failed. Output:`n$($installerResult.Output)"

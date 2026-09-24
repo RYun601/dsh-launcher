@@ -210,10 +210,14 @@ function Assert-DshPayloadPackage {
         $actualSet.Add($relative) | Out-Null
     }
     foreach ($missing in @($manifestSet | Where-Object { -not $actualSet.Contains($_) })) {
-        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11\u6e05\u5355\u58f0\u660e\u7684\u6587\u4ef6 ') + $missing
+        $diagnostic = (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u7f3a\u5c11\u6e05\u5355\u58f0\u660e\u7684\u6587\u4ef6 ') + $missing +
+            (ConvertFrom-DshUnicodeText '\u3002\u5305\u5185\u5b9e\u9645\u6587\u4ef6\uff1a') + ($actualSet -join ', ')
+        throw $diagnostic
     }
     foreach ($extra in @($actualSet | Where-Object { -not $manifestSet.Contains($_) })) {
-        throw (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5b58\u5728\u6e05\u5355\u4e4b\u5916\u7684\u6587\u4ef6 ') + $extra
+        $diagnostic = (ConvertFrom-DshUnicodeText '\u5b89\u88c5\u5931\u8d25\uff1a\u53d1\u884c\u5305\u5b58\u5728\u6e05\u5355\u4e4b\u5916\u7684\u6587\u4ef6 ') + $extra +
+            (ConvertFrom-DshUnicodeText '\u3002\u5305\u5185\u5b9e\u9645\u6587\u4ef6\uff1a') + ($actualSet -join ', ')
+        throw $diagnostic
     }
     return $packageVersion
 }
