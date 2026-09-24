@@ -16,50 +16,13 @@
 
 默认以最小改动解决问题。修改前先找到对应的公开入口、PowerShell 实现和行为测试，不要顺手重构无关脚本。
 
-## 仓库导航
+## 打包、测试与发布
 
-### 命令与启动链路
-
-- `deepseek.cmd`：公开 CLI 入口，负责参数白名单、命令分派和退出码传播。
-- `start-deepseek-harness.bat`：直接双击使用的前台兼容入口。
-- `start-background.cmd`：桌面快捷方式使用的可见后台启动包装器。
-- `start-background.ps1`：后台启动协调器，负责已有实例探测、启动锁、提交 runner 和等待就绪模式。
-- `background-run.ps1`：后台 runner，拥有 DSH 子进程、日志、生命周期状态和浏览器就绪监视器。
-- `background-run.cmd`：后台 runner 的兼容入口；复杂逻辑应继续保留在 PowerShell 中。
-- `open-when-ready.ps1`：轮询 HTTP 就绪状态并打开浏览器。
-
-### 状态、运行时与版本
-
-- `dsh-launch-state.ps1`：启动锁、状态文件、令牌转移、存活检查和状态输出的共享实现。
-- `dsh-runtime-layout.ps1`：版本化运行时目录、活动运行时指针（`runtime-current.json`）与升级事务的共享实现；含运行时路径的字符串边界与物理边界校验。
-- `dsh-service-health.ps1`：服务身份识别、HTTP 就绪判定、启动 URL 解析与 Web 访问记录（`dsh-web-access.json`）的共享实现。
-- `dsh-version.ps1` / `version-info.ps1`：版本比较共享函数与 `deepseek --version` 的版本来源实现（活动运行时指针优先，`Get-DshRuntimeVersionReport` 是统一查询入口）。
-- `dsh-maintenance-lock.ps1`：启动器维护互斥（覆盖安装、DSH 升级、自更新、完整卸载共用；`install.ps1` 内嵌同派生副本以支持 `irm | iex`，修改锁名派生时必须两处同步）。
-- `resolve-dsh-version.ps1`：选择本地已安装版本或 npm 发布版本。
-- `run-dsh.ps1`：串行准备版本化运行时、修复必要 peer 依赖、执行 npm 审计并启动 Node 入口。
-- `update-check.ps1`：比较活动运行时指针版本与 npm 最新版本；本地未知或远端失败都以非零码退出。
-- `update-launcher.ps1`：启动器自更新（`--update-launcher` 查询 / `--upgrade-launcher` 执行）：下载并校验 GitHub 发行包（SHA-256 + 包内清单）、维护互斥、目录级事务替换与失败恢复。
-- `dsh-doctor.ps1`：`deepseek --check` 的只读环境诊断，问题状态以非零码退出。
-- `dsh-logs.ps1`：`deepseek --logs` 的查看与跟随实现；基于路径轮询，轮转后自动重连。
-- `upgrade-dsh.ps1`：停止服务、清理 DSH npx 工作区、同步全局 `dsh` 命令（与目标版本保持一致，含回退降级）、准备新运行时并重新后台启动；支持 `-TargetVersion` 回退到指定已发布版本（仅允许降级）与 `-ListVersions` 只读版本列表。
-
-### 安装与维护
-
-- `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。下载后必须先校验发行包 SHA-256（API 摘要优先、`.sha256` sidecar 回退）、预检 zip 条目、核对包内 `release-files.txt` 清单，全部通过才解压安装；任一项缺失或不符都拒绝且不写入文件。
-- `install-command.cmd`：把安装目录注册到用户 `PATH`（复杂逻辑在 `register-path.ps1`，通过 `-File` 调用以兼容特殊字符路径）。
-- `set-shortcut.ps1`：创建或迁移桌面快捷方式。
-- `stop-dsh.ps1` / `stop-dsh.cmd`：按端口识别并停止 DSH 相关进程。
-- `uninstall.ps1`：移除 `PATH` 注册；完整卸载时还会处理快捷方式、日志、运行时和安装目录。
-
-### 测试与发布
-
-- `tests/*.Tests.ps1`：按职责划分的行为回归测试；测试自带断言和测试替身，不依赖 Pester。
-- `tests/start-background-harness.ps1`：后台启动场景的测试辅助脚本，不是独立测试入口。
+- `tests/*.Tests.ps1` 是按职责划分的行为回归测试，自带断言和测试替身，不依赖 Pester；`tests/start-background-harness.ps1` 只是测试辅助脚本，不是独立测试入口。
 - `.github/workflows/check.yml`：拉取请求和 `main` 分支的解析、静态守卫及 Windows 行为测试。
 - `.github/workflows/release.yml`：标签发布、测试、打包和解压归档烟雾测试。打包用 `pwsh` 的 `Compress-Archive` 把 `release-files.txt` 列出的文件组装为 `dist/dsh-launcher.zip`（顶层为 `dsh-launcher/` 目录），并生成 `dist/dsh-launcher.zip.sha256` sidecar；两者作为发行资产上传，`dist/` 不入库（`.gitignore`）。
-- `release-files.txt`：发行包的唯一文件清单；安装器与自更新以它核对包内文件集合，多文件、少文件都拒绝。
-- `VERSION`：启动器版本；发布标签必须与其组成 `v<VERSION>`。
-- `README.md` / `README.en.md`：面向最终用户的中英文文档，用户可见行为变化时必须同步。
+- `release-files.txt` 是发行包的唯一文件清单，安装器与自更新以它核对包内文件集合，多文件、少文件都拒绝；`VERSION` 是启动器版本，发布标签必须与其组成 `v<VERSION>`。
+- 用户可见的命令、参数、安装步骤、状态文本、默认路径或文件职责变化，必须同步 `README.md` 与 `README.en.md`。
 
 ### 打包与归档兼容性
 
@@ -69,7 +32,7 @@
 - 本地复现 CI 打包路径时，必须先用 `pwsh` 按 `release.yml` 的方式构建 `dist/dsh-launcher.zip` 与 sidecar，再运行 `tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip`；只用 5.1 打包会漏掉这类跨版本结构差异。
 - 修改打包流程、安装器或自更新的解压定位时，至少运行 `tests\install-behavior.Tests.ps1`、`tests\launcher-update-behavior.Tests.ps1` 和上述 `-ArchivePath` 冒烟。
 
-### GitHub 分支、提交与发布流程
+## GitHub 分支、提交与发布流程
 
 - `main` 受 GitHub 分支保护，禁止直接推送；所有变更必须通过 Pull Request 合并，并通过必需的 `validate` 与 `functional` 检查。
 - 普通功能、修复或文档提交不发布新版本：使用对应的 `feat/<topic>`、`fix/<topic>` 或其他明确用途分支，提交并推送分支后创建 PR；不要修改 `VERSION`、创建 `v*` 标签或触发 Release 工作流。
@@ -78,7 +41,7 @@
 - Release 说明必须手写为中英双语：完整中文内容在上，英文翻译在下；不得把 GitHub 自动生成的 `What's Changed` 直接作为最终 Release 正文。
 - 普通提交与版本发布必须分开判断：用户只说“提交代码”时不应擅自递增版本或推送发布标签；用户明确说“发布新版本”时才检查版本、发行清单、Release 工作流和标签一致性。
 
-### 开发验收与 Release 边界
+## 开发验收与 Release 边界
 
 - 完整 Windows 行为套件是开发完成和发布前本地 Windows 的回归验收要求。创建发布标签前，必须在待发布的同一个 commit 上完成 Windows 行为验收。
 - GitHub 的 PR/main 检查和 Release 工作流都不重复执行完整 Windows 行为套件，仅保留解析、编码、静态防护、版本、打包和最终归档冒烟等快速确定性检查。完整套件失败时应在本地 Windows 验收中处理，不应通过降低断言来让 GitHub 检查通过。
@@ -114,7 +77,7 @@
 8. `--stop` 只能停止与 DSH 启动链路相符的进程，不能因为端口被占用就终止任意进程。
 9. CLI、前台/后台包装器、升级和卸载流程必须传播真实退出码。未知参数必须报错，不能静默回落到前台启动。
 10. 正常的子进程标准错误输出本身不等于启动失败；最终状态应根据进程退出、HTTP 就绪和生命周期状态共同判断。
-11. 覆盖安装、DSH 升级、启动器自更新和完整卸载等维护事务必须持有共享维护互斥（`dsh-maintenance-lock.ps1`），锁顺序固定为维护锁 → 启动锁 → 运行时互斥；DSH 升级事务的读写与清除必须校验事务 ID。
+11. 覆盖安装、DSH 升级、启动器自更新和完整卸载等维护事务必须持有共享维护互斥（`dsh-maintenance-lock.ps1`），锁顺序固定为维护锁 → 启动锁 → 运行时互斥；DSH 升级事务的读写与清除必须校验事务 ID。`install.ps1` 为支持 `irm | iex` 内嵌了同派生的锁副本，修改锁名派生方式时必须两处同步。
 12. 运行时路径在字符串边界之外还必须满足物理边界：从 launch root 到目标的任何一级存在指向受管树之外的重解析点即拒绝；清理逻辑绝不递归删除重解析点目录。
 13. 版本查询与更新检查以活动运行时指针为准；本地版本未知时不能解释为“已是最新”，远端解析失败必须以非零码退出。
 14. 无 BOM 的 UTF-8 脚本会被 Windows PowerShell 5.1 按 ANSI 解码：无 BOM 文件中的注释与字符串字面量必须保持 ASCII；测试夹具重写带 BOM 的脚本时必须保留 BOM。
