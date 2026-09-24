@@ -428,14 +428,19 @@ try {
     Write-Host (ConvertFrom-DshUnicodeText '\u53d1\u884c\u5305 SHA-256 \u6821\u9a8c\u901a\u8fc7\u3002')
     Test-DshArchiveEntries -ZipPath $tmp
     Expand-Archive -LiteralPath $tmp -DestinationPath $staging -Force
-    $stageEntry = Join-Path $staging 'deepseek.cmd'
-    if (-not (Test-Path -LiteralPath $stageEntry)) {
-        $nested = Join-Path $staging 'dsh-launcher'
-        if (Test-Path -LiteralPath (Join-Path $nested 'deepseek.cmd')) {
-            $stageEntry = Join-Path $nested 'deepseek.cmd'
+    # R9: locate the payload root by the entries it must carry, not by a fixed
+    # top-level directory name. Packagers differ in the entry name and path
+    # separators, so search the extracted tree for the directory holding both
+    # the CLI entry and the shipped manifest.
+    $stageEntry = ''
+    foreach ($candidate in @(Get-ChildItem -LiteralPath $staging -Filter 'deepseek.cmd' -File -Recurse)) {
+        $candidateRoot = Split-Path -Parent $candidate.FullName
+        if (Test-Path -LiteralPath (Join-Path $candidateRoot 'release-files.txt') -PathType Leaf) {
+            $stageEntry = $candidate.FullName
+            break
         }
     }
-    if (-not (Test-Path -LiteralPath $stageEntry)) {
+    if (-not $stageEntry) {
         throw (ConvertFrom-DshUnicodeText '\u4e0b\u8f7d\u5305\u4e2d\u672a\u627e\u5230 deepseek.cmd')
     }
     $payloadRoot = Split-Path -Parent $stageEntry
