@@ -496,6 +496,38 @@ try {
             'A refused install must not create the install directory'
     }
 
+    Invoke-Test 'installer locates the payload root under an alternate top-level directory' {
+        # R9: packagers differ in the archive top-level entry name; the payload
+        # root must be found by the entries it carries, not by a fixed name.
+        $archive = Join-Path $testRoot 'alt-root.zip'
+        $payload = Join-Path $testRoot ('payload-' + [guid]::NewGuid().ToString('N'))
+        $bundle = Join-Path $payload 'bundle-root'
+        New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+        [IO.File]::WriteAllText((Join-Path $bundle 'VERSION'), "1.2.3`r`n", [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllText((Join-Path $bundle 'deepseek.cmd'), '@echo off' + "`r`n", [Text.Encoding]::ASCII)
+        Copy-Item -LiteralPath $nodeHelper -Destination (Join-Path $bundle 'dsh-node-version.ps1')
+        [IO.File]::WriteAllText((Join-Path $bundle 'sentinel.txt'), 'alt', [Text.Encoding]::ASCII)
+        [IO.File]::WriteAllLines(
+            (Join-Path $bundle 'release-files.txt'),
+            @('VERSION', 'deepseek.cmd', 'dsh-node-version.ps1', 'sentinel.txt', 'release-files.txt'),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $archive -CompressionLevel Optimal
+        Remove-Item -LiteralPath $payload -Recurse -Force
+        [IO.File]::WriteAllText(
+            ($archive + '.sha256'),
+            (((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()) + '  dsh-launcher.zip' + "`r`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $installDir = Join-Path $profileRoot 'alt-root-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-Equal 0 $result.ExitCode "An alternate top-level directory must still install. Output:`n$($result.Output)"
+        Assert-True (Test-Path -LiteralPath (Join-Path $installDir 'sentinel.txt')) `
+            'The payload must be located under the alternate top-level directory'
+        Assert-Equal '1.2.3' ([IO.File]::ReadAllText((Join-Path $installDir 'VERSION')).Trim()) `
+            'The installed VERSION must match the package'
+    }
+
     Invoke-Test 'path registration survives special-character install directories' {
         # R8 验收：安装注册对空格、单引号、感叹号、中文路径必须可用，且真实
         # 用户 PATH（经注入的文件存储模拟）不被触碰。

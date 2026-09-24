@@ -186,6 +186,7 @@ try {
         Write-Host "has nested entry: $([bool]($entryNames -match '^dsh-launcher/'))"
         Write-Host "has flat entry: $([bool]($entryNames -match '^[^/\\]+$'))"
         Write-Host "background-run.cmd entries: $(@($entryNames | Where-Object { $_ -match 'background-run\.cmd$' }).Count)"
+        Write-Host "first entries: $((@($entryNames | Select-Object -First 5)) -join ' | ')"
     } finally {
         $installerZip.Dispose()
     }
