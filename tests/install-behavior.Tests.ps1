@@ -204,7 +204,19 @@ try {
     [IO.File]::WriteAllText((Join-Path $payloadRoot 'sentinel.txt'), 'payload', [Text.Encoding]::ASCII)
     # R5: the installer validates the package VERSION before executing payload scripts.
     [IO.File]::WriteAllText((Join-Path $payloadRoot 'VERSION'), "0.1.11`r`n", [Text.Encoding]::ASCII)
+    # R9: the shipped manifest declares the exact package file set and the
+    # sidecar carries the release SHA-256; the installer must verify both.
+    [IO.File]::WriteAllLines(
+        (Join-Path $payloadRoot 'release-files.txt'),
+        @('VERSION', 'deepseek.cmd', 'dsh-node-version.ps1', 'sentinel.txt', 'release-files.txt'),
+        [Text.UTF8Encoding]::new($false)
+    )
     Compress-Archive -Path (Join-Path $payloadRoot '*') -DestinationPath $archivePath -CompressionLevel Optimal
+    [IO.File]::WriteAllText(
+        ($archivePath + '.sha256'),
+        (((Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()) + '  dsh-launcher.zip' + "`r`n"),
+        [Text.UTF8Encoding]::new($false)
+    )
 
     [IO.File]::WriteAllText(
         (Join-Path $fakeBin 'node.cmd'),
@@ -293,9 +305,18 @@ try {
         }
     }
 
-    # R5: transactional overwrite install helpers.
-    function New-VersionedArchive {
-        param([string]$Path, [string]$Version, [hashtable]$Files)
+    # R9: builds a release-like payload archive plus its SHA-256 sidecar. The
+    # manifest defaults to every payload file; tests can override it to model
+    # missing or undeclared files, and the sidecar can be omitted or tampered.
+    function New-TestArchive {
+        param(
+            [Parameter(Mandatory = $true)][string]$Path,
+            [Parameter(Mandatory = $true)][string]$Version,
+            [hashtable]$Files = @{},
+            [string[]]$Manifest,
+            [switch]$NoSidecar,
+            [switch]$WrongDigest
+        )
 
         $payload = Join-Path $testRoot ('payload-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Force -Path $payload | Out-Null
@@ -305,8 +326,26 @@ try {
         foreach ($fileName in $Files.Keys) {
             [IO.File]::WriteAllText((Join-Path $payload $fileName), [string]$Files[$fileName], [Text.Encoding]::ASCII)
         }
-        Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $Path -CompressionLevel Optimal
+        $manifestNames = if ($Manifest) {
+            @($Manifest)
+        } else {
+            @((Get-ChildItem -LiteralPath $payload -File | ForEach-Object { $_.Name }) + 'release-files.txt') |
+                Sort-Object -Unique
+        }
+        [IO.File]::WriteAllLines((Join-Path $payload 'release-files.txt'), $manifestNames, [Text.UTF8Encoding]::new($false))
+        Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $Path -CompressionLevel Optimal -Force
         Remove-Item -LiteralPath $payload -Recurse -Force
+        if (-not $NoSidecar) {
+            $digest = (Get-FileHash $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($WrongDigest) { $digest = ('0' * 64) }
+            [IO.File]::WriteAllText(($Path + '.sha256'), "$digest  dsh-launcher.zip`r`n", [Text.UTF8Encoding]::new($false))
+        }
+    }
+
+    function New-VersionedArchive {
+        param([string]$Path, [string]$Version, [hashtable]$Files)
+
+        New-TestArchive -Path $Path -Version $Version -Files $Files
     }
 
     function Get-LeftoverTransactionDirs {
@@ -379,6 +418,82 @@ try {
         Assert-Equal 'added' ([IO.File]::ReadAllText((Join-Path $installDir 'c.txt')).Trim()) 'The committed overwrite must add new files'
         Assert-Equal '2.0.0' ([IO.File]::ReadAllText((Join-Path $installDir 'VERSION')).Trim()) 'The committed VERSION must match the package'
         Assert-Equal 0 @(Get-LeftoverTransactionDirs -InstallDir $installDir).Count 'A committed install must clean its old-install backup'
+    }
+
+    # R9: download integrity and package manifest verification for the installer.
+    Invoke-Test 'installer refuses an archive without SHA-256 verification material' {
+        $archive = Join-Path $testRoot 'unsigned.zip'
+        New-TestArchive -Path $archive -Version '1.0.0' -Files @{ 'a.txt' = 'x' } -NoSidecar
+        $installDir = Join-Path $profileRoot 'unsigned-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-True ($result.ExitCode -ne 0) "A missing digest must refuse the install. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'SHA-256' 'The refusal must name the missing digest material'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDir 'deepseek.cmd'))) `
+            'A refused install must not create the install directory'
+    }
+
+    Invoke-Test 'installer refuses an archive whose SHA-256 does not match' {
+        $archive = Join-Path $testRoot 'tampered.zip'
+        New-TestArchive -Path $archive -Version '1.0.0' -Files @{ 'a.txt' = 'x' } -WrongDigest
+        $installDir = Join-Path $profileRoot 'tampered-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-True ($result.ExitCode -ne 0) "A digest mismatch must refuse the install. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'SHA-256' 'The refusal must name the failed digest check'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDir 'deepseek.cmd'))) `
+            'A refused install must not create the install directory'
+    }
+
+    Invoke-Test 'installer refuses a package that carries files outside the release manifest' {
+        $archive = Join-Path $testRoot 'manifest-extra.zip'
+        New-TestArchive -Path $archive -Version '1.0.0' `
+            -Files @{ 'a.txt' = 'x'; 'sneaky.ps1' = 'Write-Host evil' } `
+            -Manifest @('VERSION', 'deepseek.cmd', 'dsh-node-version.ps1', 'a.txt', 'release-files.txt')
+        $installDir = Join-Path $profileRoot 'manifest-extra-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-True ($result.ExitCode -ne 0) "A file outside the manifest must refuse the install. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'sneaky\.ps1' 'The refusal must name the manifest-external file'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDir 'sneaky.ps1'))) `
+            'A refused install must not copy manifest-external files'
+    }
+
+    Invoke-Test 'installer refuses a package that is missing a manifest-declared file' {
+        $archive = Join-Path $testRoot 'manifest-missing.zip'
+        New-TestArchive -Path $archive -Version '1.0.0' -Files @{ 'a.txt' = 'x' } `
+            -Manifest @('VERSION', 'deepseek.cmd', 'dsh-node-version.ps1', 'ghost.txt', 'release-files.txt')
+        $installDir = Join-Path $profileRoot 'manifest-missing-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-True ($result.ExitCode -ne 0) "A missing manifest file must refuse the install. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'ghost\.txt' 'The refusal must name the missing manifest file'
+    }
+
+    Invoke-Test 'installer refuses a zip entry that escapes the staging directory' {
+        $archive = Join-Path $testRoot 'traversal.zip'
+        New-TestArchive -Path $archive -Version '1.0.0' -Files @{ 'a.txt' = 'x' }
+        # Inject a traversal entry, then re-sign the sidecar so the only failure
+        # is the entry validation itself.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+        $zip = [IO.Compression.ZipFile]::Open($archive, 'Update')
+        try {
+            $evil = $zip.CreateEntry('../evil.txt')
+            $writer = New-Object IO.StreamWriter($evil.Open())
+            $writer.Write('evil')
+            $writer.Dispose()
+        } finally {
+            $zip.Dispose()
+        }
+        [IO.File]::WriteAllText(
+            ($archive + '.sha256'),
+            (((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()) + '  dsh-launcher.zip' + "`r`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $installDir = Join-Path $profileRoot 'traversal-install'
+        $result = Invoke-Installer -InstallDir $installDir -ArchivePath $archive
+        Assert-True ($result.ExitCode -ne 0) "A traversal entry must refuse the install. Output:`n$($result.Output)"
+        Assert-Match $result.Output 'evil\.txt' 'The refusal must name the traversal entry'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $tempRoot 'evil.txt'))) `
+            'The traversal entry must not extract outside the staging dir'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $installDir 'deepseek.cmd'))) `
+            'A refused install must not create the install directory'
     }
 
     Invoke-Test 'path registration survives special-character install directories' {

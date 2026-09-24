@@ -1,5 +1,9 @@
 ﻿# AGENTS.md
 
+# Output Language
+- Output in Simplified Chinese.
+- Always respond to the user in Simplified Chinese, regardless of the language of the user's input.
+
 ## 适用范围
 
 本文件适用于仓库根目录及其全部子目录。仓库中若以后出现更深层的 `AGENTS.md`，以更深层文件对其目录树的说明为准。
