@@ -474,19 +474,24 @@ try {
             throw "解压后出现暂存目录之外的文件：$($extracted.FullName)"
         }
     }
-    $stageEntry = Join-Path $staging 'deepseek.cmd'
-    $nestedRoot = Join-Path $staging 'dsh-launcher'
-    $payloadRoot = ''
-    if ((Test-Path -LiteralPath $stageEntry -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $nestedRoot 'deepseek.cmd') -PathType Leaf)) {
-        throw '发行包结构异常：根目录与 dsh-launcher 子目录同时包含入口'
+    # 与 install.ps1 相同：按“目录同时包含 deepseek.cmd 与 release-files.txt”
+    # 在解压树中定位 payload 根目录，不硬编码顶层目录名，也不假设条目分隔符
+    # （发布包由 pwsh 打包、此处由 5.1 解压，两者结构可能不同）。
+    $payloadCandidates = @(
+        foreach ($candidate in @(Get-ChildItem -LiteralPath $staging -Filter 'deepseek.cmd' -File -Recurse)) {
+            $candidateRoot = Split-Path -Parent $candidate.FullName
+            if (Test-Path -LiteralPath (Join-Path $candidateRoot 'release-files.txt') -PathType Leaf) {
+                $candidateRoot
+            }
+        }
+    )
+    if ($payloadCandidates.Count -gt 1) {
+        throw '发行包结构异常：解压后存在多个携带清单的入口目录'
     }
-    if (Test-Path -LiteralPath $stageEntry -PathType Leaf) {
-        $payloadRoot = $staging
-    } elseif (Test-Path -LiteralPath (Join-Path $nestedRoot 'deepseek.cmd') -PathType Leaf) {
-        $payloadRoot = $nestedRoot
-    } else {
+    if ($payloadCandidates.Count -eq 0) {
         throw '发行包中未找到 deepseek.cmd'
     }
+    $payloadRoot = $payloadCandidates[0]
     Assert-DshUpdatePackage -PayloadRoot $payloadRoot -ExpectedVersion $targetVersion | Out-Null
     Write-Host "发行包验证完成：$targetVersion"
 

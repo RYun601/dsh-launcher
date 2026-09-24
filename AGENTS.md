@@ -31,11 +31,12 @@
 ### 状态、运行时与版本
 
 - `dsh-launch-state.ps1`：启动锁、状态文件、令牌转移、存活检查和状态输出的共享实现。
+- `dsh-runtime-layout.ps1`：版本化运行时目录、活动运行时指针（`runtime-current.json`）与升级事务的共享实现；含运行时路径的字符串边界与物理边界校验。
+- `dsh-service-health.ps1`：服务身份识别、HTTP 就绪判定、启动 URL 解析与 Web 访问记录（`dsh-web-access.json`）的共享实现。
 - `dsh-version.ps1` / `version-info.ps1`：版本比较共享函数与 `deepseek --version` 的版本来源实现（活动运行时指针优先，`Get-DshRuntimeVersionReport` 是统一查询入口）。
 - `dsh-maintenance-lock.ps1`：启动器维护互斥（覆盖安装、DSH 升级、自更新、完整卸载共用；`install.ps1` 内嵌同派生副本以支持 `irm | iex`，修改锁名派生时必须两处同步）。
 - `resolve-dsh-version.ps1`：选择本地已安装版本或 npm 发布版本。
 - `run-dsh.ps1`：串行准备版本化运行时、修复必要 peer 依赖、执行 npm 审计并启动 Node 入口。
-- `dsh-version.ps1`：版本解析和比较的共享函数。
 - `update-check.ps1`：比较活动运行时指针版本与 npm 最新版本；本地未知或远端失败都以非零码退出。
 - `update-launcher.ps1`：启动器自更新（`--update-launcher` 查询 / `--upgrade-launcher` 执行）：下载并校验 GitHub 发行包（SHA-256 + 包内清单）、维护互斥、目录级事务替换与失败恢复。
 - `dsh-doctor.ps1`：`deepseek --check` 的只读环境诊断，问题状态以非零码退出。
@@ -44,7 +45,7 @@
 
 ### 安装与维护
 
-- `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。
+- `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。下载后必须先校验发行包 SHA-256（API 摘要优先、`.sha256` sidecar 回退）、预检 zip 条目、核对包内 `release-files.txt` 清单，全部通过才解压安装；任一项缺失或不符都拒绝且不写入文件。
 - `install-command.cmd`：把安装目录注册到用户 `PATH`（复杂逻辑在 `register-path.ps1`，通过 `-File` 调用以兼容特殊字符路径）。
 - `set-shortcut.ps1`：创建或迁移桌面快捷方式。
 - `stop-dsh.ps1` / `stop-dsh.cmd`：按端口识别并停止 DSH 相关进程。
@@ -55,10 +56,18 @@
 - `tests/*.Tests.ps1`：按职责划分的行为回归测试；测试自带断言和测试替身，不依赖 Pester。
 - `tests/start-background-harness.ps1`：后台启动场景的测试辅助脚本，不是独立测试入口。
 - `.github/workflows/check.yml`：拉取请求和 `main` 分支的解析、静态守卫及 Windows 行为测试。
-- `.github/workflows/release.yml`：标签发布、测试、打包和解压归档烟雾测试。
-- `release-files.txt`：发行包的唯一文件清单。
+- `.github/workflows/release.yml`：标签发布、测试、打包和解压归档烟雾测试。打包用 `pwsh` 的 `Compress-Archive` 把 `release-files.txt` 列出的文件组装为 `dist/dsh-launcher.zip`（顶层为 `dsh-launcher/` 目录），并生成 `dist/dsh-launcher.zip.sha256` sidecar；两者作为发行资产上传，`dist/` 不入库（`.gitignore`）。
+- `release-files.txt`：发行包的唯一文件清单；安装器与自更新以它核对包内文件集合，多文件、少文件都拒绝。
 - `VERSION`：启动器版本；发布标签必须与其组成 `v<VERSION>`。
 - `README.md` / `README.en.md`：面向最终用户的中英文文档，用户可见行为变化时必须同步。
+
+### 打包与归档兼容性
+
+发布包的组装（`pwsh` 的 `Compress-Archive`）与安装/冒烟链路的解压（Windows PowerShell 5.1 的 `Expand-Archive`）运行在不同 PowerShell 版本上，两者生成的 zip 条目分隔符与顶层目录命名可能不一致。2026-09-24 的 0.4.3 发布就因安装器硬编码顶层目录名 `dsh-launcher` 定位 payload 根目录，导致 Release 冒烟连续失败。
+
+- `install.ps1` 与 `update-launcher.ps1` 必须按“目录同时包含 `deepseek.cmd` 与 `release-files.txt`”在解压树中定位 payload 根目录；不得硬编码顶层目录名，也不得假设条目使用某一种路径分隔符。
+- 本地复现 CI 打包路径时，必须先用 `pwsh` 按 `release.yml` 的方式构建 `dist/dsh-launcher.zip` 与 sidecar，再运行 `tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip`；只用 5.1 打包会漏掉这类跨版本结构差异。
+- 修改打包流程、安装器或自更新的解压定位时，至少运行 `tests\install-behavior.Tests.ps1`、`tests\launcher-update-behavior.Tests.ps1` 和上述 `-ArchivePath` 冒烟。
 
 ### GitHub 分支、提交与发布流程
 
@@ -109,6 +118,8 @@
 12. 运行时路径在字符串边界之外还必须满足物理边界：从 launch root 到目标的任何一级存在指向受管树之外的重解析点即拒绝；清理逻辑绝不递归删除重解析点目录。
 13. 版本查询与更新检查以活动运行时指针为准；本地版本未知时不能解释为“已是最新”，远端解析失败必须以非零码退出。
 14. 无 BOM 的 UTF-8 脚本会被 Windows PowerShell 5.1 按 ANSI 解码：无 BOM 文件中的注释与字符串字面量必须保持 ASCII；测试夹具重写带 BOM 的脚本时必须保留 BOM。
+15. 安装与自更新链路必须校验发行包完整性：解压前核对 SHA-256（API 摘要或 `.sha256` sidecar）、拒绝危险 zip 条目（盘符、ADS、绝对路径、父目录穿越、大小写重名、空条目、超大条目），解压后核对包内 `release-files.txt` 清单（多文件、少文件都拒绝）；摘要或清单材料缺失时拒绝执行，不得仅凭传输链路信任下载内容。
+16. payload 根目录必须按包内条目定位（同时包含 `deepseek.cmd` 与 `release-files.txt` 的目录），不得硬编码顶层目录名或假设某一种路径分隔符：发布包由 `pwsh` 打包、由 Windows PowerShell 5.1 解压，两者的条目结构可能不同。
 
 运行数据通常位于 `%USERPROFILE%\dsh-launch`，用户的 DSH 配置和凭据位于 `%USERPROFILE%\.dsh`。不要在测试、日志、提交或诊断输出中读取或复制真实 API Key。`%USERPROFILE%\.dsh` 是唯一不可通过重新安装再生的数据（运行时可随时由 npm 重装重建）；任何脚本、清理或卸载逻辑都必须确保绝不写入、移动或删除该目录。
 
@@ -167,11 +178,20 @@ if ($LASTEXITCODE -ne 0) { throw 'startup behavior test failed' }
 - 启动分派、参数、后台协调和 runner：`tests/startup-behavior.Tests.ps1`
 - 锁、状态和失败生命周期：`tests/launch-state-behavior.Tests.ps1`
 - 运行时安装、peer 修复、审计和串行化：`tests/runtime-preparation-behavior.Tests.ps1`
+- 运行时指针、版本目录与升级事务：`tests/runtime-layout-behavior.Tests.ps1`
 - 本地/远端版本选择与比较：`tests/version-resolution-behavior.Tests.ps1`、`tests/version-ordering-behavior.Tests.ps1`
+- Node.js 前置检查：`tests/node-version-behavior.Tests.ps1`
+- 服务身份识别与 HTTP 就绪判定：`tests/service-health-behavior.Tests.ps1`
 - 浏览器就绪检测：`tests/open-when-ready-behavior.Tests.ps1`
+- `--open` 浏览器选择与认证 URL：`tests/open-dsh-behavior.Tests.ps1`
+- Web 访问 URL 记录与启动输出捕获：`tests/web-access-behavior.Tests.ps1`、`tests/web-access-capture-behavior.Tests.ps1`
 - 停止逻辑：`tests/stop-behavior.Tests.ps1`
 - 快捷方式：`tests/shortcut-behavior.Tests.ps1`
-- 更新与升级缓存：`tests/update-check-behavior.Tests.ps1`、`tests/upgrade-cache-behavior.Tests.ps1`
+- 日志查看与跟随：`tests/logs-behavior.Tests.ps1`
+- 安装链路（路径边界、事务替换、发行包校验）：`tests/install-behavior.Tests.ps1`
+- 启动器自更新（查询、执行、失败恢复）：`tests/launcher-update-behavior.Tests.ps1`
+- 卸载（普通注销与完整卸载事务）：`tests/uninstall-behavior.Tests.ps1`
+- 更新检查与升级缓存：`tests/update-check-behavior.Tests.ps1`、`tests/upgrade-cache-behavior.Tests.ps1`
 - 发行文件和打包后分派：`tests/release-package-behavior.Tests.ps1`
 
 这些测试通过 `$env:TEMP` 下的临时 profile、fake executable 和日志替身隔离外部状态。新增测试必须在 `finally` 中清理临时资源，不能触碰开发者真实的 `%USERPROFILE%\dsh-launch`、npm 缓存、桌面快捷方式或浏览器。
@@ -220,7 +240,12 @@ foreach ($test in $tests) {
 if ($LASTEXITCODE -ne 0) { throw 'release package behavior test failed' }
 ```
 
-实际生成 `dist/dsh-launcher.zip` 后，再使用 `-ArchivePath .\dist\dsh-launcher.zip` 验证解压后的归档。
+复现 CI 打包路径（`pwsh` 组装、5.1 解压）时，先用 `pwsh` 按 `release.yml` 的步骤生成 `dist/dsh-launcher.zip` 与 `.sha256` sidecar，再验证解压后的归档：
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip
+if ($LASTEXITCODE -ne 0) { throw 'extracted release archive smoke test failed' }
+```
 
 ## 文档与发布同步
 
