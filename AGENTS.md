@@ -31,8 +31,6 @@
 ### 状态、运行时与版本
 
 - `dsh-launch-state.ps1`：启动锁、状态文件、令牌转移、存活检查和状态输出的共享实现。
-- `dsh-runtime-layout.ps1`：版本化运行时目录、活动运行时指针（`runtime-current.json`）与升级事务的共享实现；含运行时路径的字符串边界与物理边界校验。
-- `dsh-service-health.ps1`：服务身份识别、HTTP 就绪判定、启动 URL 解析与 Web 访问记录（`dsh-web-access.json`）的共享实现。
 - `dsh-version.ps1` / `version-info.ps1`：版本比较共享函数与 `deepseek --version` 的版本来源实现（活动运行时指针优先，`Get-DshRuntimeVersionReport` 是统一查询入口）。
 - `dsh-maintenance-lock.ps1`：启动器维护互斥（覆盖安装、DSH 升级、自更新、完整卸载共用；`install.ps1` 内嵌同派生副本以支持 `irm | iex`，修改锁名派生时必须两处同步）。
 - `resolve-dsh-version.ps1`：选择本地已安装版本或 npm 发布版本。
@@ -45,7 +43,7 @@
 
 ### 安装与维护
 
-- `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。下载后必须先校验发行包 SHA-256（API 摘要优先、`.sha256` sidecar 回退）、预检 zip 条目、核对包内 `release-files.txt` 清单，全部通过才解压安装；任一项缺失或不符都拒绝且不写入文件。
+- `install.ps1`：Release 下载和安装入口，也可迁移或创建快捷方式。
 - `install-command.cmd`：把安装目录注册到用户 `PATH`（复杂逻辑在 `register-path.ps1`，通过 `-File` 调用以兼容特殊字符路径）。
 - `set-shortcut.ps1`：创建或迁移桌面快捷方式。
 - `stop-dsh.ps1` / `stop-dsh.cmd`：按端口识别并停止 DSH 相关进程。
