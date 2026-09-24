@@ -1,6 +1,6 @@
 ﻿# AGENTS.md
 
-# Output Language
+## Output Language
 - Output in Simplified Chinese.
 - Always respond to the user in Simplified Chinese, regardless of the language of the user's input.
 
@@ -21,16 +21,22 @@
 - `tests/*.Tests.ps1` 是按职责划分的行为回归测试，自带断言和测试替身，不依赖 Pester；`tests/start-background-harness.ps1` 只是测试辅助脚本，不是独立测试入口。
 - `.github/workflows/check.yml`：拉取请求和 `main` 分支的解析、静态守卫及 Windows 行为测试。
 - `.github/workflows/release.yml`：标签发布、测试、打包和解压归档烟雾测试。打包用 `pwsh` 的 `Compress-Archive` 把 `release-files.txt` 列出的文件组装为 `dist/dsh-launcher.zip`（顶层为 `dsh-launcher/` 目录），并生成 `dist/dsh-launcher.zip.sha256` sidecar；两者作为发行资产上传，`dist/` 不入库（`.gitignore`）。
-- `release-files.txt` 是发行包的唯一文件清单，安装器与自更新以它核对包内文件集合，多文件、少文件都拒绝；`VERSION` 是启动器版本，发布标签必须与其组成 `v<VERSION>`。
-- 用户可见的命令、参数、安装步骤、状态文本、默认路径或文件职责变化，必须同步 `README.md` 与 `README.en.md`。
+- `release-files.txt` 是发行包的唯一文件清单，安装器与自更新以它核对包内文件集合，多文件、少文件都拒绝。
 
 ### 打包与归档兼容性
 
 发布包的组装（`pwsh` 的 `Compress-Archive`）与安装/冒烟链路的解压（Windows PowerShell 5.1 的 `Expand-Archive`）运行在不同 PowerShell 版本上，两者生成的 zip 条目分隔符与顶层目录命名可能不一致。2026-09-24 的 0.4.3 发布就因安装器硬编码顶层目录名 `dsh-launcher` 定位 payload 根目录，导致 Release 冒烟连续失败。
 
 - `install.ps1` 与 `update-launcher.ps1` 必须按“目录同时包含 `deepseek.cmd` 与 `release-files.txt`”在解压树中定位 payload 根目录；不得硬编码顶层目录名，也不得假设条目使用某一种路径分隔符。
-- 本地复现 CI 打包路径时，必须先用 `pwsh` 按 `release.yml` 的方式构建 `dist/dsh-launcher.zip` 与 sidecar，再运行 `tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip`；只用 5.1 打包会漏掉这类跨版本结构差异。
-- 修改打包流程、安装器或自更新的解压定位时，至少运行 `tests\install-behavior.Tests.ps1`、`tests\launcher-update-behavior.Tests.ps1` 和上述 `-ArchivePath` 冒烟。
+- 修改打包流程、安装器或自更新的解压定位时，至少运行 `tests\install-behavior.Tests.ps1`、`tests\launcher-update-behavior.Tests.ps1` 和发行包冒烟。复现 CI 打包路径时，必须先用 `pwsh` 按 `release.yml` 的步骤生成 `dist/dsh-launcher.zip` 与 `.sha256` sidecar，再以 `-ArchivePath` 验证解压后的归档；只用 5.1 打包会漏掉这类跨版本结构差异。
+
+```powershell
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\release-package-behavior.Tests.ps1
+if ($LASTEXITCODE -ne 0) { throw 'release package behavior test failed' }
+
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip
+if ($LASTEXITCODE -ne 0) { throw 'extracted release archive smoke test failed' }
+```
 
 ## GitHub 分支、提交与发布流程
 
@@ -65,7 +71,7 @@
 
 ## 核心行为不变量
 
-修改启动、状态、停止、版本或升级代码时必须保持以下约束：
+修改启动器任何代码时必须保持以下约束：
 
 1. DSH Web 使用 `http://127.0.0.1:3080`；更改端口需要完整更新探测、状态、停止、浏览器和文档链路，不能只改一处。
 2. 后台启动只能有一个有效启动所有者。启动锁、状态文件、启动令牌和 launcher 到 runner 的 PID 转移必须保持一致。
@@ -112,7 +118,7 @@
 2. 对行为变化先增加或调整能复现目标行为的回归测试；文档或纯注释修改无需制造无意义测试。
 3. 实现最小修复，保留现有公开参数、输出含义、路径和退出码，除非任务明确要求改变它们。
 4. 先运行最接近改动的单个测试，再执行解析检查和完整 Windows 行为套件。
-5. 按“测试与发布同步”检查是否需要更新双语 README、`release-files.txt`、CI 静态守卫或 `VERSION`。
+5. 按“文档与发布同步”检查是否需要更新双语 README、`release-files.txt`、CI 静态守卫或 `VERSION`。
 
 不要修改 `dist/` 中的副本来实现功能；发行物由工作流根据 `release-files.txt` 重新组装。不要提交日志、本地运行时、npm 缓存、用户配置或测试临时目录。
 
@@ -194,27 +200,11 @@ foreach ($test in $tests) {
 
 某些进程识别测试需要访问 `Win32_Process`。受限沙箱若拒绝 `Get-CimInstance`，应明确报告环境限制；不要删除或放宽相应断言来制造通过结果。
 
-### 发行包验证
-
-修改 `release-files.txt`、入口分派、安装或打包流程时至少运行：
-
-```powershell
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\release-package-behavior.Tests.ps1
-if ($LASTEXITCODE -ne 0) { throw 'release package behavior test failed' }
-```
-
-复现 CI 打包路径（`pwsh` 组装、5.1 解压）时，先用 `pwsh` 按 `release.yml` 的步骤生成 `dist/dsh-launcher.zip` 与 `.sha256` sidecar，再验证解压后的归档：
-
-```powershell
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\release-package-behavior.Tests.ps1 -ArchivePath .\dist\dsh-launcher.zip
-if ($LASTEXITCODE -ne 0) { throw 'extracted release archive smoke test failed' }
-```
-
 ## 文档与发布同步
 
 - git 提交信息（commit message）一律使用中文书写。
 - Release 说明（release notes）使用中英双语书写，方便中英文用户阅读。
-- GitHub Release 的显示标题必须严格等于标签 `v<VERSION>`；工作流中显式使用 `name: ${{ github.ref_name }}`，补写发布说明时不得改写标题。发行资产名保持为 `dsh-launcher.zip`。
+- GitHub Release 的显示标题必须严格等于标签 `v<VERSION>`，补写发布说明时不得改写标题；发行资产名保持为 `dsh-launcher.zip`。
 - 用户可见命令、参数、安装步骤、状态文本、默认路径或文件职责变化时，同时更新 `README.md` 和 `README.en.md`。
 - 新增或重命名发行时需要携带的文件时更新 `release-files.txt`，并运行发行包行为测试。
 - 只有准备新版本发布时才修改 `VERSION`。标签名必须严格等于 `v` 加 `VERSION` 内容。
