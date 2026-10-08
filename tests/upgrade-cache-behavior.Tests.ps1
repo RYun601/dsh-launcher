@@ -401,7 +401,7 @@ try {
         Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A current global dsh must not trigger npm install'
     }
 
-    Invoke-Test 'normal upgrade accepts a newer resolved version after a rollback' {
+    Invoke-Test 'normal upgrade accepts a newer resolved version' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'upgrade-after-rollback') `
             -NpmLog (Join-Path $testRoot 'upgrade-after-rollback-npm.log') `
             -ResolvedVersion '0.1.0-rc.8'
@@ -421,7 +421,7 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture
 
-        Assert-Equal 0 $result.ExitCode "A normal upgrade after rollback should succeed. Output:`n$($result.Output)"
+        Assert-Equal 0 $result.ExitCode "A normal upgrade to a newer version should succeed. Output:`n$($result.Output)"
         Assert-Match ([IO.File]::ReadAllText($fixture.StartLog)) 'VERSION=0\.1\.0-rc\.8' `
             'A normal upgrade must treat the resolved latest version as an upgrade target'
         Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.0-rc\.8$' `
@@ -620,7 +620,7 @@ try {
         return $launchDir
     }
 
-    Invoke-Test 'rollback switches the active runtime to the requested older version and downgrades global dsh' {
+    Invoke-Test 'explicit target version switches the active runtime to an older version and downgrades global dsh' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-switch') `
             -NpmLog (Join-Path $testRoot 'rollback-switch-npm.log') `
             -GlobalDshVersion '0.1.2-rc.1' `
@@ -629,22 +629,44 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.1-rc.2')
 
-        Assert-Equal 0 $result.ExitCode "A rollback to an older published version should succeed. Output:`n$($result.Output)"
-        Assert-Match $result.Output '0\.1\.1-rc\.2' 'The rollback must report its target version'
-        Assert-True (Test-Path -LiteralPath $fixture.StopMarker) 'A rollback must stop the running service before switching runtimes'
+        Assert-Equal 0 $result.ExitCode "Switching to an older published version should succeed. Output:`n$($result.Output)"
+        Assert-Match $result.Output '0\.1\.1-rc\.2' 'The switch must report its target version'
+        Assert-True (Test-Path -LiteralPath $fixture.StopMarker) 'A version switch must stop the running service before switching runtimes'
         $startCall = [IO.File]::ReadAllText($fixture.StartLog)
         Assert-Match $startCall '^VERSION=0\.1\.1-rc\.2;WAIT=True;TIMEOUT=900$' `
-            'The rollback must restart through the synchronous startup coordinator'
+            'The switch must restart through the synchronous startup coordinator'
         Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.1-rc\.2$' `
-            'A newer global dsh command must be downgraded to the rollback target'
+            'A newer global dsh command must be downgraded to the switch target'
         $committedPointer = Get-Content -LiteralPath (Join-Path $launchDir 'runtime-current.json') -Raw | ConvertFrom-Json
         Assert-Equal '0.1.1-rc.2' ([string]$committedPointer.Current.Version) `
-            'The active pointer must move to the rollback target after a validated restart'
+            'The active pointer must move to the switch target after a validated restart'
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-upgrade.json'))) `
-            'A completed rollback must clear its transaction record'
+            'A completed switch must clear its transaction record'
     }
 
-    Invoke-Test 'rollback to the currently active version is a no-op' {
+    Invoke-Test 'explicit target version switches the active runtime to a newer version' {
+        # 指定版本不再限定方向：目标高于当前活动版本时同样执行切换。
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'switch-newer') `
+            -NpmLog (Join-Path $testRoot 'switch-newer-npm.log') `
+            -GlobalDshVersion '0.1.1-rc.2' `
+            -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
+        $launchDir = New-ReadyPointerRuntime -Fixture $fixture -Version '0.1.1-rc.2'
+
+        $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.2-rc.1')
+
+        Assert-Equal 0 $result.ExitCode "Switching to a newer published version should succeed. Output:`n$($result.Output)"
+        Assert-Match $result.Output '0\.1\.2-rc\.1' 'The switch must report its target version'
+        Assert-True (Test-Path -LiteralPath $fixture.StopMarker) 'A version switch must stop the running service'
+        Assert-Match ([IO.File]::ReadAllText($fixture.StartLog)) '^VERSION=0\.1\.2-rc\.1;WAIT=True;TIMEOUT=900$' `
+            'The switch must restart through the synchronous startup coordinator'
+        Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.2-rc\.1$' `
+            'The global dsh command must be upgraded to the switch target'
+        $committedPointer = Get-Content -LiteralPath (Join-Path $launchDir 'runtime-current.json') -Raw | ConvertFrom-Json
+        Assert-Equal '0.1.2-rc.1' ([string]$committedPointer.Current.Version) `
+            'The active pointer must move to the newer switch target'
+    }
+
+    Invoke-Test 'explicit target version equal to the active version is a no-op' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-same') `
             -NpmLog (Join-Path $testRoot 'rollback-same-npm.log') `
             -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
@@ -652,30 +674,30 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.1-rc.2')
 
-        Assert-Equal 0 $result.ExitCode "A rollback to the active version should be a no-op. Output:`n$($result.Output)"
+        Assert-Equal 0 $result.ExitCode "Switching to the active version should be a no-op. Output:`n$($result.Output)"
         Assert-Match $result.Output 'already' 'The no-op result must be explicit'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'A no-op rollback must not stop the service'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'A no-op rollback must not restart the service'
-        Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A no-op rollback must not touch the global dsh command'
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-versions'))) 'A no-op rollback must not prepare a candidate runtime'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'A no-op switch must not stop the service'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'A no-op switch must not restart the service'
+        Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A no-op switch must not touch the global dsh command'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-versions'))) 'A no-op switch must not prepare a candidate runtime'
     }
 
-    Invoke-Test 'rollback refuses a target version newer than the active runtime' {
-        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-newer') `
-            -NpmLog (Join-Path $testRoot 'rollback-newer-npm.log') `
+    Invoke-Test 'explicit target version installs when the active version cannot be determined' {
+        # 全新夹具：没有运行时也没有指针。活动版本未知不再阻止切换指定版本。
+        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'switch-unknown-active') `
+            -NpmLog (Join-Path $testRoot 'switch-unknown-active-npm.log') `
             -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
-        New-ReadyPointerRuntime -Fixture $fixture -Version '0.1.1-rc.2' | Out-Null
 
-        $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.2-rc.1')
+        $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.1-rc.2')
 
-        Assert-Equal 1 $result.ExitCode 'A newer target must be refused because rollback only downgrades. Output:`n$($result.Output)'
-        Assert-Match $result.Output '--upgrade' 'The refusal must point at the upgrade command'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'A refused rollback must not stop the service'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'A refused rollback must not restart the service'
-        Assert-Equal '' (Read-NpmLog $fixture.NpmLog) 'A refused rollback must not touch the global dsh command'
+        Assert-Equal 0 $result.ExitCode "An explicit target must install even when the active version is unknown. Output:`n$($result.Output)"
+        Assert-Match ([IO.File]::ReadAllText($fixture.StartLog)) '^VERSION=0\.1\.1-rc\.2;WAIT=True;TIMEOUT=900$' `
+            'The explicit target must be prepared and started when no runtime is active'
+        Assert-Match (Read-NpmLog $fixture.NpmLog) '^install -g @deepseek-ai/dsh@0\.1\.1-rc\.2$' `
+            'The global dsh command must be synchronized to the explicit target'
     }
 
-    Invoke-Test 'rollback aborts when the target version was never published' {
+    Invoke-Test 'explicit target version aborts when the target version was never published' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-unknown') `
             -NpmLog (Join-Path $testRoot 'rollback-unknown-npm.log') `
             -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
@@ -683,13 +705,13 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.0.9-rc.1')
 
-        Assert-Equal 1 $result.ExitCode 'An unpublished target must abort the rollback. Output:`n$($result.Output)'
-        Assert-Match $result.Output 'rollback aborted' 'The abort message must be explicit'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'An aborted rollback must not stop the service'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'An aborted rollback must not restart the service'
+        Assert-Equal 1 $result.ExitCode 'An unpublished target must abort the switch. Output:`n$($result.Output)'
+        Assert-Match $result.Output 'upgrade aborted' 'The abort message must be explicit'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'An aborted switch must not stop the service'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'An aborted switch must not restart the service'
     }
 
-    Invoke-Test 'rollback aborts on a malformed target version' {
+    Invoke-Test 'explicit target version aborts on a malformed target version' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-malformed') `
             -NpmLog (Join-Path $testRoot 'rollback-malformed-npm.log') `
             -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
@@ -697,26 +719,12 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', 'not-a-semver!!')
 
-        Assert-Equal 1 $result.ExitCode 'A malformed target must abort the rollback. Output:`n$($result.Output)'
-        Assert-Match $result.Output 'rollback aborted' 'The abort message must be explicit'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'An aborted rollback must not stop the service'
+        Assert-Equal 1 $result.ExitCode 'A malformed target must abort the switch. Output:`n$($result.Output)'
+        Assert-Match $result.Output 'upgrade aborted' 'The abort message must be explicit'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'An aborted switch must not stop the service'
     }
 
-    Invoke-Test 'rollback aborts when the active version cannot be determined' {
-        # 全新夹具：没有运行时也没有指针，活动版本未知时无法校验降级方向。
-        $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-unknown-active') `
-            -NpmLog (Join-Path $testRoot 'rollback-unknown-active-npm.log') `
-            -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
-
-        $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-TargetVersion', '0.1.1-rc.2')
-
-        Assert-Equal 1 $result.ExitCode 'An unknown active version must abort the rollback. Output:`n$($result.Output)'
-        Assert-Match $result.Output 'rollback aborted' 'The abort message must be explicit'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'An aborted rollback must not stop the service'
-        Assert-True (-not (Test-Path -LiteralPath $fixture.StartLog)) 'An aborted rollback must not restart the service'
-    }
-
-    Invoke-Test 'rollback listing reports the active and published versions without side effects' {
+    Invoke-Test 'version listing reports the active and published versions without side effects' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-list') `
             -NpmLog (Join-Path $testRoot 'rollback-list-npm.log') `
             -PublishedVersions @('0.1.2-rc.1', '0.1.1-rc.2')
@@ -724,7 +732,7 @@ try {
 
         $result = Invoke-UpgradeFixture -Fixture $fixture -ExtraArguments @('-ListVersions')
 
-        Assert-Equal 0 $result.ExitCode "The rollback listing should succeed. Output:`n$($result.Output)"
+        Assert-Equal 0 $result.ExitCode "The version listing should succeed. Output:`n$($result.Output)"
         Assert-Match $result.Output 'active version' 'The listing must report the active version'
         Assert-Match $result.Output 'published versions[\s\S]*0\.1\.2-rc\.1[\s\S]*0\.1\.1-rc\.2' `
             'The published list must be printed newest first'
@@ -734,7 +742,7 @@ try {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $launchDir 'runtime-versions'))) 'The listing must not prepare a candidate runtime'
     }
 
-    Invoke-Test 'rollback listing truncates to the default 20 newest versions with a full-list hint' {
+    Invoke-Test 'version listing truncates to the default 20 newest versions with a full-list hint' {
         # 25 个已发布版本（新 → 旧）：默认列表只显示最近 20 个并提示完整列表。
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-list-cap') `
             -NpmLog (Join-Path $testRoot 'rollback-list-cap-npm.log') `
@@ -754,7 +762,7 @@ try {
         Assert-True (-not (Test-Path -LiteralPath $fixture.StopMarker)) 'The truncated listing must not stop the service'
     }
 
-    Invoke-Test 'rollback listing shows every version when the display count is zero' {
+    Invoke-Test 'version listing shows every version when the display count is zero' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-list-all') `
             -NpmLog (Join-Path $testRoot 'rollback-list-all-npm.log') `
             -PublishedVersions @(24..0 | ForEach-Object { "2.0.$($_)" })
@@ -769,7 +777,7 @@ try {
             'An untruncated listing must not print the truncation hint'
     }
 
-    Invoke-Test 'rollback listing honors an explicit positive display count' {
+    Invoke-Test 'version listing honors an explicit positive display count' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-list-five') `
             -NpmLog (Join-Path $testRoot 'rollback-list-five-npm.log') `
             -PublishedVersions @(24..0 | ForEach-Object { "2.0.$($_)" })
@@ -786,7 +794,7 @@ try {
             'A truncated listing must tell how to obtain the full version list'
     }
 
-    Invoke-Test 'rollback listing rejects a negative display count' {
+    Invoke-Test 'version listing rejects a negative display count' {
         $fixture = New-UpgradeFixture -Root (Join-Path $testRoot 'rollback-list-negative') `
             -NpmLog (Join-Path $testRoot 'rollback-list-negative-npm.log') `
             -PublishedVersions @('0.1.1-rc.2')
