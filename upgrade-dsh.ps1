@@ -1,5 +1,5 @@
 ﻿param(
-    # 回退模式：显式指定目标已发布版本（必须低于当前活动版本）。
+    # 显式指定目标已发布版本：高于或低于当前活动版本均可，用于切换到指定版本。
     [string]$TargetVersion,
     # 只读列表模式：打印当前活动版本与 npm 已发布版本后退出，不做任何修改。
     [switch]$ListVersions,
@@ -27,7 +27,7 @@ $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $dir 'dsh-runtime-layout.ps1')
 . (Join-Path $dir 'dsh-maintenance-lock.ps1')
 
-# 只读列表模式：不检查 Node、不加维护锁、不停服，用于挑选回退目标版本。
+# 只读列表模式：不检查 Node、不加维护锁、不停服，用于挑选目标版本。
 if ($ListVersions) {
     if ($TargetVersion) {
         Write-Host '[ERROR] 列表模式不接受目标版本参数；请单独使用 -ListVersions 或 -TargetVersion。'
@@ -58,35 +58,19 @@ if ($ListVersions) {
 # 0) Node.js 版本前置检查：不满足要求时直接失败，不触碰正在运行的服务。
 if (-not (Assert-DshNodeEnvironment)) { exit 1 }
 
-# 1) 目标版本：显式指定时为回退模式（只允许降级），否则取各 dist-tag（latest/next/...）中的最高者。
+# 1) 目标版本：显式指定时安装该已发布版本（升级或回退都可以），
+#    否则取各 dist-tag（latest/next/...）中的最高者。
 #    必须先成功解析并校验版本，才允许停止服务或清理任何东西。
 if ($TargetVersion) {
     $resolvedTargetVersion = [string]$TargetVersion
     if (-not (ConvertTo-DshSemVer $resolvedTargetVersion)) {
-        Write-Host "[ERROR] 指定的回退版本无效：$resolvedTargetVersion，回退已取消（rollback aborted）；当前安装未被更改。"
+        Write-Host "[ERROR] 指定的目标版本无效：$resolvedTargetVersion，切换已取消（upgrade aborted）；当前安装未被更改。"
         exit 1
     }
     $publishedVersions = @(& (Join-Path $dir 'resolve-dsh-version.ps1') -ListPublished)
     if (@($publishedVersions | Where-Object { [string]$_ -eq $resolvedTargetVersion }).Count -eq 0) {
-        Write-Host "[ERROR] 版本 $resolvedTargetVersion 不在 npm 已发布版本列表中，回退已取消（rollback aborted）；当前安装未被更改。"
+        Write-Host "[ERROR] 版本 $resolvedTargetVersion 不在 npm 已发布版本列表中，切换已取消（upgrade aborted）；当前安装未被更改。"
         exit 1
-    }
-    # 降级方向校验：本地版本未知时不能解释为可回退，必须先能确定当前版本（R13）。
-    $rollbackLayout = Get-DshRuntimeLayout -LaunchRoot (Join-Path $env:USERPROFILE 'dsh-launch')
-    $rollbackReport = Get-DshRuntimeVersionReport -Layout $rollbackLayout
-    $activeVersion = [string]$rollbackReport.ActiveVersion
-    if (-not $activeVersion -or $activeVersion -eq 'unknown') {
-        Write-Host '[ERROR] 当前活动版本未知，无法校验回退方向；请先正常启动一次，或改用 deepseek --upgrade。回退已取消（rollback aborted）；当前安装未被更改。'
-        exit 1
-    }
-    $rollbackDirection = Compare-DshVersion $resolvedTargetVersion $activeVersion
-    if ($rollbackDirection -gt 0) {
-        Write-Host "[ERROR] 目标版本 $resolvedTargetVersion 高于当前版本 $activeVersion，回退只允许降级；如需升级请使用 deepseek --upgrade。回退已取消（rollback aborted）；当前安装未被更改。"
-        exit 1
-    }
-    if ($rollbackDirection -eq 0) {
-        Write-Host "当前运行时已是版本 $activeVersion，无需回退（already at target）。"
-        exit 0
     }
 } else {
     $latest = & (Join-Path $dir 'resolve-dsh-version.ps1')
@@ -122,18 +106,14 @@ if ($oldRuntime -and -not $oldRuntimeReady) {
     Write-Host "[WARN] 当前运行时未通过就绪校验（$($oldRuntime.Version)），升级回退将尝试其他可用运行时。"
 }
 
-# 方向感知守卫：升级模式在“已最新”时空操作；回退模式在“已是目标”时空操作、
-# 在“当前低于目标”时拒绝（防锁前校验与事务之间的状态变化）。
+# 方向感知守卫：升级到最新时“已最新”则空操作；显式指定目标版本时
+# “已是目标”则空操作（防锁前解析与事务之间的状态变化）。
 if ($oldRuntimeReady) {
     $versionCompare = Compare-DshVersion $oldRuntime.Version $resolvedTargetVersion
     if ($TargetVersion) {
         if ($versionCompare -eq 0) {
-            Write-Host "当前运行时已是版本：$($oldRuntime.Version)，无需回退（already at target）。"
+            Write-Host "当前运行时已是版本：$($oldRuntime.Version)，无需切换（already at target）。"
             exit 0
-        }
-        if ($versionCompare -lt 0) {
-            Write-Host '[ERROR] 当前运行时版本低于回退目标，回退已取消（rollback aborted）；当前安装未被更改。'
-            exit 1
         }
     } elseif ($versionCompare -ge 0) {
         Write-Host "当前运行时已是最新版本：$($oldRuntime.Version)，无需升级（already latest）。"
